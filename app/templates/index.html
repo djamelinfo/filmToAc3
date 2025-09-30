@@ -1,0 +1,60 @@
+<!-- app/templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AC3Fixer</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+    <div class="container">
+        <h1>AC3Fixer</h1>
+        <p class="muted">Root: <code>{{ media_path }}</code></p>
+
+
+        <form action="/scan" method="post" class="row">
+            <label>Extension:
+                <input type="text" name="ext" value="{{ ext }}" />
+            </label>
+            <button type="submit">Scan</button>
+        </form>
+
+
+        <form action="/convert" method="post">
+            <button type="submit">Convert all pending</button>
+        </form>
+
+
+        <h2>Planned jobs</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th>Output</th>
+                    <th>Action</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for j in jobs %}
+                <tr>
+                    <td>{{ j.src.name }}</td>
+                    <td>{% if j.will_convert %}{{ j.out.name }}{% else %}—{% endif %}</td>
+                    <td>{% if j.will_convert %}Convert{% else %}Skip{% endif %}</td>
+                    <td>{{ j.reason }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+
+        <footer>
+            <p class="muted">Bitrate {{ bitrate }}, Channels {{ channels }} | Powered by ffmpeg/ffprobe</p>
+        </footer>
+    </div>
+</body>
+
+</html>

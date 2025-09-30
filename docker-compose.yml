@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+ac3fixer:
+build: .
+container_name: ac3fixer
+environment:
+- MEDIA_PATH=/data
+- FILE_EXT=.mkv
+- AUDIO_BITRATE=640k
+- AUDIO_CHANNELS=6
+- TZ=Europe/Paris
+ports:
+- "8088:8000"
+volumes:
+- ./data:/data
+restart: unless-stopped
