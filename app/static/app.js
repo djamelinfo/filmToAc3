@@ -8,6 +8,8 @@ scanForm.addEventListener("submit", () => {
 const conversionForm = document.querySelector("#conversion-form");
 const jobsTable = document.querySelector("#jobs-table");
 const jobsMessage = document.querySelector("#jobs-message");
+const statCounters = document.querySelectorAll("[data-stat]");
+const formatCount = new Intl.NumberFormat();
 let lastJobs;
 let refreshingJobs = false;
 
@@ -17,7 +19,10 @@ async function refreshJobs() {
     try {
         const response = await fetch(jobsTable.dataset.url, { cache: "no-store" });
         if (!response.ok) throw new Error();
-        const jobs = await response.json();
+        const { jobs, stats } = await response.json();
+        for (const counter of statCounters) {
+            counter.textContent = formatCount.format(stats[counter.dataset.stat]);
+        }
         jobsMessage.textContent = jobs.length ? "" : "No conversions queued.";
         jobsTable.hidden = jobs.length === 0;
 
@@ -34,6 +39,22 @@ async function refreshJobs() {
             status.className = `status ${job.status}`;
             status.textContent = job.status;
             cell.append(status);
+            if (job.status === "running") {
+                const progress = document.createElement("progress");
+                progress.max = 100;
+                progress.setAttribute("aria-label", `Conversion progress for ${job.source}`);
+                const indicator = document.createElement("div");
+                indicator.className = "job-progress";
+                indicator.append(progress);
+                if (typeof job.progress === "number") {
+                    progress.value = job.progress;
+                    const percentage = document.createElement("span");
+                    percentage.textContent = `${job.progress}%`;
+                    percentage.setAttribute("aria-hidden", "true");
+                    indicator.append(percentage);
+                }
+                cell.append(indicator);
+            }
             if (job.message) {
                 const message = document.createElement("small");
                 message.textContent = job.message;

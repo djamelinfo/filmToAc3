@@ -200,6 +200,10 @@ class WorkflowTest(unittest.TestCase):
             self.assertIn(value, page)
         self.assertEqual(snapshot(self.source), original_files)
         self.assertEqual(list(self.output.iterdir()), [existing_output])
+        self.assertEqual(
+            json.loads(self.request("/dashboard"))["stats"],
+            {"found": 5, "needs_attention": 4, "completed": 1, "in_progress": 0},
+        )
 
         def select(path, index=1, make_default=False):
             return {
@@ -209,23 +213,20 @@ class WorkflowTest(unittest.TestCase):
             }
 
         started, resume = Event(), Event()
-        real_run = converter._run
+        real_run = converter._run_conversion
         failing_input = failing.resolve()
 
-        def block_failing_ffmpeg(command, **kwargs):
-            if (
-                command[0] == "ffmpeg"
-                and Path(command[command.index("-i") + 1]) == failing_input
-                and Path(command[-1]).suffix == ".part"
-            ):
-                # Trigger FFmpeg's own no-overwrite error at the temporary path.
+        def block_failing_ffmpeg(command, duration, report_progress):
+            if Path(command[command.index("-i") + 1]) == failing_input:
+                # Leave partial output and trigger an FFmpeg error on every supported version.
                 Path(command[-1]).write_bytes(b"partial output")
                 started.set()
                 if not resume.wait(timeout=10):
                     raise RuntimeError("The test did not release FFmpeg in time.")
-            return real_run(command, **kwargs)
+                command = [command[0], "-ac3fixer-test-invalid-option", *command[1:]]
+            return real_run(command, duration, report_progress)
 
-        with patch.object(converter, "_run", side_effect=block_failing_ffmpeg):
+        with patch.object(converter, "_run_conversion", block_failing_ffmpeg):
             try:
                 queued = json.loads(self.request("/convert", body=[
                     select(failing), select(feature), select(stereo, 3, make_default=True),
@@ -235,6 +236,10 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(started.wait(timeout=10), self.request("/jobs"))
                 jobs = json.loads(self.request("/jobs"))
                 self.assertEqual([job["status"] for job in jobs], ["running", "queued", "queued", "queued"])
+                self.assertEqual(
+                    json.loads(self.request("/dashboard"))["stats"],
+                    {"found": 5, "needs_attention": 1, "completed": 0, "in_progress": 4},
+                )
                 duplicates = json.loads(self.request("/convert", body=[select(failing), select(feature)]))
                 self.assertEqual(duplicates, {"queued": 0, "already_active": 2})
             finally:
@@ -244,6 +249,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([job["status"] for job in jobs], ["failed", "completed", "completed", "skipped"])
         self.assertIn("ffmpeg:", jobs[0]["message"])
         self.assertIn("Output already exists", jobs[3]["message"])
+        self.assertEqual(
+            json.loads(self.request("/dashboard"))["stats"],
+            {"found": 5, "needs_attention": 2, "completed": 3, "in_progress": 0},
+        )
         self.assertEqual(existing_output.read_bytes(), b"previous output")
         self.assertFalse((self.output / "Write failure.ac3.mkv").exists())
         self.assertEqual(list(self.output.rglob(".ac3fixer-*")), [])
@@ -257,6 +266,56 @@ class WorkflowTest(unittest.TestCase):
             channels=2, language="jpn", make_default=True,
         )
         self.assertIn("Films/Été à 東京.ac3.mkv", self.request("/scan", body=b""))
+
+    def test_running_job_reports_progress_before_publish(self):
+        feature = self.source / "Progress.mkv"
+        make_fixture(feature, self.work_dir)
+        self.request("/scan", body=b"")
+        reached, resume = Event(), Event()
+        percentages = []
+        real_run = converter._run_conversion
+
+        def wait_for_observation(command, duration, report_progress):
+            def report(percent):
+                percentages.append(percent)
+                report_progress(percent)
+                if percent == 50:
+                    reached.set()
+                    if not resume.wait(timeout=10):
+                        raise RuntimeError("The test did not release the conversion in time.")
+
+            # Control the reports so the test does not depend on how fast FFmpeg runs.
+            converter._report_ffmpeg_progress(
+                ["out_time_us=N/A", "out_time_us=-1000", "out_time_us=1000000",
+                 "out_time_us=500000", "out_time_us=2000000"],
+                2_000_000, report,
+            )
+            real_run(command, duration, None)
+
+        result = self.output / "Progress.ac3.mkv"
+        with patch.object(converter, "_run_conversion", wait_for_observation):
+            try:
+                self.request("/convert", body=[{"source": feature.name, "track_index": 1}])
+                self.assertTrue(reached.wait(timeout=10), self.request("/jobs"))
+                dashboard = json.loads(self.request("/dashboard"))
+                job = dashboard["jobs"][0]
+                self.assertEqual(job["status"], "running")
+                self.assertEqual(job["progress"], 50)
+                self.assertEqual(dashboard["stats"]["in_progress"], 1)
+                self.assertFalse(result.exists())
+            finally:
+                resume.set()
+            job = self.wait_for_jobs(1)[0]
+
+        self.assertEqual(job["status"], "completed", job["message"])
+        self.assertEqual(job["progress"], 100)
+        self.assertEqual(percentages, [0, 50, 99])
+        result.unlink()
+        self.request("/scan", body=b"")
+        self.assertEqual(
+            json.loads(self.request("/dashboard"))["stats"],
+            {"found": 1, "needs_attention": 1, "completed": 0, "in_progress": 0},
+        )
 
     def test_rescan_reuses_unchanged_audio_metadata(self):
         feature = self.source / "Feature.mkv"

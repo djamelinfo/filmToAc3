@@ -23,6 +23,25 @@
             <p>Add an AC-3 compatibility track to MKV files for Jellyfin.</p>
         </header>
 
+        <dl class="library-stats" aria-label="Library summary">
+            <div>
+                <dt>MKVs found</dt>
+                <dd data-stat="found">{{ stats.found }}</dd>
+            </div>
+            <div>
+                <dt>Needs attention</dt>
+                <dd data-stat="needs_attention">{{ stats.needs_attention }}</dd>
+            </div>
+            <div>
+                <dt>Completed</dt>
+                <dd data-stat="completed">{{ stats.completed }}</dd>
+            </div>
+            <div>
+                <dt><a href="#jobs-heading">In progress</a></dt>
+                <dd data-stat="in_progress">{{ stats.in_progress }}</dd>
+            </div>
+        </dl>
+
         <section aria-labelledby="media-heading">
             <div class="row">
                 <h2 id="media-heading">Media</h2>
@@ -127,7 +146,7 @@
             <h2 id="jobs-heading">Conversion jobs</h2>
             <p id="jobs-message" class="muted" role="status">Loading jobs…</p>
             <div class="table-wrap">
-                <table id="jobs-table" data-url="{{ url_for('jobs') }}" hidden>
+                <table id="jobs-table" data-url="{{ url_for('dashboard') }}" hidden>
                     <thead>
                         <tr>
                             <th scope="col">Source file</th>
