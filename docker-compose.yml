@@ -1,6 +1,6 @@
 services:
   ac3fixer:
-    build: .
+    image: ghcr.io/djamelinfo/filmtoac3:v1.0.0
     init: true
     ports:
       - "127.0.0.1:${AC3FIXER_PORT:-8088}:8000"
