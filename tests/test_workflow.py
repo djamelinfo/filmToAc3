@@ -186,24 +186,35 @@ class WorkflowTest(unittest.TestCase):
         make_fixture(feature, self.work_dir)
         stereo = self.source / "Stereo default.mkv"
         existing = self.source / "Already made.MKV"
+        compatible = self.source / "Already compatible.mkv"
         failing = self.source / "Write failure.mkv"
         for path in (stereo, existing, failing):
             path.write_bytes(feature.read_bytes())
+        run(
+            "ffmpeg", "-v", "error", "-i", str(feature),
+            "-map", "0:v:0", "-map", "0:a:1", "-c", "copy", str(compatible),
+        )
         (self.source / "Unreadable.mkv").write_bytes(b"broken MKV")
         existing_output = self.output / "Already made.ac3.mkv"
         existing_output.write_bytes(b"previous output")
         original_files = snapshot(self.source)
 
         page = self.request("/scan", body=b"")
-        for value in ("Films/Été à 東京.mkv", "French main", "English dub", "Japanese stereo",
-                      "Scan error", "Unreadable.mkv", "Output already exists", "6 ch", "DTS", "AC-3"):
+        for value in ("Files to convert", "Films/Été à 東京.mkv", "French main", "English dub",
+                      "Japanese stereo", "Scan errors", "Unreadable.mkv", "6 ch", "DTS", "AC-3"):
             self.assertIn(value, page)
+        for name in ("Already compatible.mkv", "Already made.MKV", "Unreadable.mkv"):
+            self.assertNotIn(f'data-source="{name}"', page)
         self.assertEqual(snapshot(self.source), original_files)
         self.assertEqual(list(self.output.iterdir()), [existing_output])
+        dashboard = json.loads(self.request("/dashboard"))
         self.assertEqual(
-            json.loads(self.request("/dashboard"))["stats"],
-            {"found": 5, "needs_attention": 4, "completed": 1, "in_progress": 0},
+            dashboard["stats"],
+            {"found": 6, "needs_attention": 4, "completed": 1, "in_progress": 0},
         )
+        self.assertCountEqual(dashboard["pending_sources"], [
+            "Films/Été à 東京.mkv", "Stereo default.mkv", "Write failure.mkv",
+        ])
 
         def select(path, index=1, make_default=False):
             return {
@@ -236,10 +247,13 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(started.wait(timeout=10), self.request("/jobs"))
                 jobs = json.loads(self.request("/jobs"))
                 self.assertEqual([job["status"] for job in jobs], ["running", "queued", "queued", "queued"])
+                dashboard = json.loads(self.request("/dashboard"))
                 self.assertEqual(
-                    json.loads(self.request("/dashboard"))["stats"],
-                    {"found": 5, "needs_attention": 1, "completed": 0, "in_progress": 4},
+                    dashboard["stats"],
+                    {"found": 6, "needs_attention": 1, "completed": 0, "in_progress": 4},
                 )
+                self.assertEqual(dashboard["pending_sources"], [])
+                self.assertIn('data-source="Write failure.mkv" hidden', self.request("/"))
                 duplicates = json.loads(self.request("/convert", body=[select(failing), select(feature)]))
                 self.assertEqual(duplicates, {"queued": 0, "already_active": 2})
             finally:
@@ -249,10 +263,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([job["status"] for job in jobs], ["failed", "completed", "completed", "skipped"])
         self.assertIn("ffmpeg:", jobs[0]["message"])
         self.assertIn("Output already exists", jobs[3]["message"])
+        dashboard = json.loads(self.request("/dashboard"))
         self.assertEqual(
-            json.loads(self.request("/dashboard"))["stats"],
-            {"found": 5, "needs_attention": 2, "completed": 3, "in_progress": 0},
+            dashboard["stats"],
+            {"found": 6, "needs_attention": 2, "completed": 3, "in_progress": 0},
         )
+        self.assertEqual(dashboard["pending_sources"], ["Write failure.mkv"])
         self.assertEqual(existing_output.read_bytes(), b"previous output")
         self.assertFalse((self.output / "Write failure.ac3.mkv").exists())
         self.assertEqual(list(self.output.rglob(".ac3fixer-*")), [])
@@ -265,7 +281,9 @@ class WorkflowTest(unittest.TestCase):
             stereo, self.output / "Stereo default.ac3.mkv",
             channels=2, language="jpn", make_default=True,
         )
-        self.assertIn("Films/Été à 東京.ac3.mkv", self.request("/scan", body=b""))
+        page = self.request("/scan", body=b"")
+        self.assertIn('data-source="Write failure.mkv"', page)
+        self.assertNotIn('data-source="Films/Été à 東京.mkv"', page)
 
     def test_running_job_reports_progress_before_publish(self):
         feature = self.source / "Progress.mkv"
@@ -335,7 +353,8 @@ class WorkflowTest(unittest.TestCase):
 
             (self.output / "Feature.ac3.mkv").write_bytes(b"existing output")
             page = self.request("/scan", body=b"")
-            self.assertIn("Feature.ac3.mkv", page)
+            self.assertNotIn('data-source="Feature.mkv"', page)
+            self.assertIn('data-source="Other.mkv"', page)
             self.assertEqual(len(probed), 2)
 
             info = other.stat()
@@ -346,6 +365,7 @@ class WorkflowTest(unittest.TestCase):
             other.unlink()
             page = self.request("/scan", body=b"")
             self.assertNotIn("Other.mkv", page)
+            self.assertIn("No files waiting to be queued.", page)
             self.assertEqual(len(probed), 3)
 
     def test_mono_without_default_audio(self):

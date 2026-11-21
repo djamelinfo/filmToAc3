@@ -38,8 +38,9 @@ file atomically and keep any existing destination intact.
 
 ## Scan and convert
 
-1. Click **Scan media** to list MKV files in the source directory and its
-   subfolders. Each row shows the audio tracks and any scan error for that file.
+1. Click **Scan media** to inspect MKVs in the source directory and its
+   subfolders. **Files to convert** shows MKVs with a DTS or DTS-HD track that
+   still need an output. Scan errors appear separately.
 2. Pick a DTS track in each file you want to convert. Select **Make AC-3 default**
    on a file if Jellyfin should prefer the new track. Otherwise the existing
    audio default flags are preserved. AC-3 tracks already in the source stay in
@@ -51,6 +52,9 @@ file atomically and keep any existing destination intact.
    and the queue moves on to the next file.
 4. Use the verified MKV from the output directory. For example,
    `./data/Films/Movie.mkv` produces `./output/Films/Movie.ac3.mkv`.
+
+The conversion list updates when files enter the queue or finish. Failed files
+that can be retried return to the list.
 
 AC3Fixer probes up to two MKVs at a time. Set `SCAN_WORKERS=1` to limit scanning
 to one probe at a time on a busy network share. Repeat scans reuse audio metadata

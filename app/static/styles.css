@@ -70,6 +70,11 @@ section {
 .paths dd { margin: 0; overflow-wrap: anywhere; }
 .paths dt { color: #4b5a6d; }
 
+.scan-errors { margin: 0 0 1rem; }
+.scan-errors summary { cursor: pointer; font-weight: 600; }
+.scan-errors li { overflow-wrap: anywhere; }
+.scan-errors small { display: block; }
+
 button, select { font: inherit; }
 button {
     padding: .4rem .75rem;
@@ -118,4 +123,4 @@ small, .error { white-space: pre-line; }
 }
 
 .job-progress progress { width: 100%; accent-color: #154996; }
-#jobs-message:empty { display: none; }
+#jobs-message:empty, #queue-message:empty { display: none; }

@@ -44,7 +44,7 @@
 
         <section aria-labelledby="media-heading">
             <div class="row">
-                <h2 id="media-heading">Media</h2>
+                <h2 id="media-heading">Files to convert</h2>
                 <form id="scan-form" action="{{ url_for('scan') }}" method="post">
                     <button type="submit">Scan media</button>
                 </form>
@@ -55,17 +55,31 @@
                 <dt>Output directory</dt>
                 <dd><code>{{ output_path }}</code></dd>
             </dl>
-            {% if scan_errors %}
-                <ul class="errors" aria-label="Scan errors">
-                    {% for error in scan_errors %}<li>{{ error }}</li>{% endfor %}
-                </ul>
+            {% if scan_errors or file_errors %}
+                <details class="scan-errors" open>
+                    <summary>Scan errors ({{ (scan_errors | length) + (file_errors | length) }})</summary>
+                    <ul class="errors">
+                        {% for error in scan_errors %}<li>{{ error }}</li>{% endfor %}
+                        {% for file in file_errors %}
+                            <li><code>{{ file.source }}</code><small class="error">{{ file.error }}</small></li>
+                        {% endfor %}
+                    </ul>
+                </details>
+            {% endif %}
+
+            {% if not scanned %}
+                <p class="muted">Scan media to find MKVs that need conversion.</p>
+            {% elif not stats.found %}
+                <p class="muted">No MKV files found.</p>
+            {% else %}
+                <p id="queue-message" role="status"></p>
+                <p id="pending-empty" class="muted"{% if pending_sources %} hidden{% endif %}>No files waiting to be queued.</p>
             {% endif %}
 
             {% if media %}
-                <form id="conversion-form" action="{{ url_for('enqueue') }}">
+                <form id="conversion-form" action="{{ url_for('enqueue') }}"{% if not pending_sources %} hidden{% endif %}>
                     <div class="row">
                         <button type="submit" disabled>Queue selected files</button>
-                        <span id="queue-message" role="status"></span>
                     </div>
                     <div class="table-wrap">
                         <table class="media-table">
@@ -79,55 +93,39 @@
                             <tbody>
                                 {% for file in media %}
                                     {% set candidates = file.tracks | selectattr('is_dts') | list %}
-                                    <tr data-source="{{ file.source }}">
-                                        <th scope="row">
-                                            <code>{{ file.source }}</code>
-                                            {% if file.output_exists %}
-                                                <small>Output already exists at <code>{{ file.output }}</code></small>
-                                            {% endif %}
-                                        </th>
+                                    <tr data-source="{{ file.source }}"{% if file.source not in pending_sources %} hidden{% endif %}>
+                                        <th scope="row"><code>{{ file.source }}</code></th>
                                         <td>
-                                            {% if file.tracks %}
-                                                <ul class="tracks">
-                                                    {% for track in file.tracks %}
-                                                        <li>
-                                                            <strong>#{{ track.index }} {{ codec_name(track) }}</strong>
-                                                            <span class="track-details">
-                                                                {% if track.language %}{{ track.language }}{% endif %}
-                                                                {% if track.channels %} · {{ track.channels }} ch{% endif %}
-                                                                {% if track.default is not none %}
-                                                                    · {{ 'Default' if track.default else 'Non-default' }}
-                                                                {% endif %}
-                                                            </span>
-                                                            {% if track.title %}<small>{{ track.title }}</small>{% endif %}
-                                                        </li>
-                                                    {% endfor %}
-                                                </ul>
-                                            {% elif not file.error %}
-                                                <span class="muted">No audio tracks</span>
-                                            {% endif %}
-                                            {% if file.error %}
-                                                <p class="error">Scan error. {{ file.error }}</p>
-                                            {% endif %}
+                                            <ul class="tracks">
+                                                {% for track in file.tracks %}
+                                                    <li>
+                                                        <strong>#{{ track.index }} {{ codec_name(track) }}</strong>
+                                                        <span class="track-details">
+                                                            {% if track.language %}{{ track.language }}{% endif %}
+                                                            {% if track.channels %} · {{ track.channels }} ch{% endif %}
+                                                            {% if track.default is not none %}
+                                                                · {{ 'Default' if track.default else 'Non-default' }}
+                                                            {% endif %}
+                                                        </span>
+                                                        {% if track.title %}<small>{{ track.title }}</small>{% endif %}
+                                                    </li>
+                                                {% endfor %}
+                                            </ul>
                                         </td>
                                         <td>
-                                            {% if candidates and not file.error %}
-                                                <label class="choice">
-                                                    DTS track
-                                                    <select class="track-choice" aria-label="DTS track for {{ file.source }}">
-                                                        <option value="">Do not queue</option>
-                                                        {% for track in candidates %}
-                                                            <option value="{{ track.index }}">#{{ track.index }} {{ codec_name(track) }}{% if track.language %} · {{ track.language }}{% endif %}{% if track.title %} · {{ track.title }}{% endif %}</option>
-                                                        {% endfor %}
-                                                    </select>
-                                                </label>
-                                                <label class="checkbox">
-                                                    <input type="checkbox" class="make-default">
-                                                    Make AC-3 default
-                                                </label>
-                                            {% elif not file.error %}
-                                                <span class="muted">No DTS tracks</span>
-                                            {% endif %}
+                                            <label class="choice">
+                                                DTS track
+                                                <select class="track-choice" aria-label="DTS track for {{ file.source }}">
+                                                    <option value="">Do not queue</option>
+                                                    {% for track in candidates %}
+                                                        <option value="{{ track.index }}">#{{ track.index }} {{ codec_name(track) }}{% if track.language %} · {{ track.language }}{% endif %}{% if track.title %} · {{ track.title }}{% endif %}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </label>
+                                            <label class="checkbox">
+                                                <input type="checkbox" class="make-default">
+                                                Make AC-3 default
+                                            </label>
                                         </td>
                                     </tr>
                                 {% endfor %}
@@ -135,10 +133,6 @@
                         </table>
                     </div>
                 </form>
-            {% elif scanned %}
-                <p class="muted">No MKV files found.</p>
-            {% else %}
-                <p class="muted">Scan media to list the MKV files in your source directory.</p>
             {% endif %}
         </section>
 
