@@ -1,0 +1,21 @@
+{
+  "branches": ["master"],
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "docker buildx imagetools create --prefer-index=false --tag \"$IMAGE_NAME:${nextRelease.gitTag}\" \"$IMAGE_NAME@$IMAGE_DIGEST\""
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "successComment": false,
+        "releasedLabels": false,
+        "failTitle": false
+      }
+    ]
+  ]
+}

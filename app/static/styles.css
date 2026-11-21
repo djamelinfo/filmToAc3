@@ -1,0 +1,81 @@
+body {
+    margin: 0;
+    color: #172337;
+    background: #f4f6fa;
+    font: 1rem/1.5 system-ui, sans-serif;
+}
+
+.container {
+    max-width: 72rem;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+}
+
+header p, .muted, small, .track-details { color: #4b5a6d; }
+h1, h2, header p { margin: 0; }
+h1 { font-size: 2rem; }
+h2 { font-size: 1.25rem; }
+
+section {
+    margin-top: 1.5rem;
+    padding: 1.25rem;
+    border: 1px solid #dbe2ed;
+    border-radius: .75rem;
+    background: #fff;
+}
+
+.row {
+    display: flex;
+    gap: .75rem 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: .75rem;
+}
+
+.paths {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: .2rem .75rem;
+    margin: 0 0 1rem;
+}
+
+.paths dd { margin: 0; overflow-wrap: anywhere; }
+.paths dt { color: #4b5a6d; }
+
+button, select { font: inherit; }
+button {
+    padding: .4rem .75rem;
+    border: 1px solid transparent;
+    border-radius: .4rem;
+    background: #154996;
+    color: #fff;
+    cursor: pointer;
+}
+button:hover:enabled { background: #103973; }
+button:disabled { background: #e5eaf1; color: #4b5a6d; cursor: default; }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+.media-table { min-width: 40rem; }
+th, td {
+    padding: .65rem .75rem;
+    border-bottom: 1px solid #dbe2ed;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+thead th { background: #edf2f9; }
+tbody th { width: 30%; font-weight: normal; }
+td small, th small { display: block; margin-top: .2rem; }
+small, .error { white-space: pre-line; }
+.tracks { margin: 0; padding: 0; list-style: none; }
+.tracks li + li { margin-top: .5rem; }
+.choice { display: grid; gap: .2rem; }
+.choice select { width: 100%; max-width: 16rem; padding: .25rem; }
+.checkbox { display: flex; gap: .35rem; align-items: center; margin-top: .5rem; }
+
+.status { text-transform: capitalize; }
+.status.completed { color: #117043; }
+.status.failed, .error, .errors { color: #a51d23; }
+.status.running { color: #154996; }
+#jobs-message:empty { display: none; }
