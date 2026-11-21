@@ -186,20 +186,35 @@ class WorkflowTest(unittest.TestCase):
         make_fixture(feature, self.work_dir)
         stereo = self.source / "Stereo default.mkv"
         existing = self.source / "Already made.MKV"
+        compatible = self.source / "Already compatible.mkv"
         failing = self.source / "Write failure.mkv"
         for path in (stereo, existing, failing):
             path.write_bytes(feature.read_bytes())
+        run(
+            "ffmpeg", "-v", "error", "-i", str(feature),
+            "-map", "0:v:0", "-map", "0:a:1", "-c", "copy", str(compatible),
+        )
         (self.source / "Unreadable.mkv").write_bytes(b"broken MKV")
         existing_output = self.output / "Already made.ac3.mkv"
         existing_output.write_bytes(b"previous output")
         original_files = snapshot(self.source)
 
         page = self.request("/scan", body=b"")
-        for value in ("Films/Été à 東京.mkv", "French main", "English dub", "Japanese stereo",
-                      "Scan error", "Unreadable.mkv", "Output already exists", "6 ch", "DTS", "AC-3"):
+        for value in ("Files to convert", "Films/Été à 東京.mkv", "French main", "English dub",
+                      "Japanese stereo", "Scan errors", "Unreadable.mkv", "6 ch", "DTS", "AC-3"):
             self.assertIn(value, page)
+        for name in ("Already compatible.mkv", "Already made.MKV", "Unreadable.mkv"):
+            self.assertNotIn(f'data-source="{name}"', page)
         self.assertEqual(snapshot(self.source), original_files)
         self.assertEqual(list(self.output.iterdir()), [existing_output])
+        dashboard = json.loads(self.request("/dashboard"))
+        self.assertEqual(
+            dashboard["stats"],
+            {"found": 6, "needs_attention": 4, "completed": 1, "in_progress": 0},
+        )
+        self.assertCountEqual(dashboard["pending_sources"], [
+            "Films/Été à 東京.mkv", "Stereo default.mkv", "Write failure.mkv",
+        ])
 
         def select(path, index=1, make_default=False):
             return {
@@ -209,23 +224,20 @@ class WorkflowTest(unittest.TestCase):
             }
 
         started, resume = Event(), Event()
-        real_run = converter._run
+        real_run = converter._run_conversion
         failing_input = failing.resolve()
 
-        def block_failing_ffmpeg(command, **kwargs):
-            if (
-                command[0] == "ffmpeg"
-                and Path(command[command.index("-i") + 1]) == failing_input
-                and Path(command[-1]).suffix == ".part"
-            ):
-                # Trigger FFmpeg's own no-overwrite error at the temporary path.
+        def block_failing_ffmpeg(command, duration, report_progress):
+            if Path(command[command.index("-i") + 1]) == failing_input:
+                # Leave partial output and trigger an FFmpeg error on every supported version.
                 Path(command[-1]).write_bytes(b"partial output")
                 started.set()
                 if not resume.wait(timeout=10):
                     raise RuntimeError("The test did not release FFmpeg in time.")
-            return real_run(command, **kwargs)
+                command = [command[0], "-ac3fixer-test-invalid-option", *command[1:]]
+            return real_run(command, duration, report_progress)
 
-        with patch.object(converter, "_run", side_effect=block_failing_ffmpeg):
+        with patch.object(converter, "_run_conversion", block_failing_ffmpeg):
             try:
                 queued = json.loads(self.request("/convert", body=[
                     select(failing), select(feature), select(stereo, 3, make_default=True),
@@ -235,6 +247,13 @@ class WorkflowTest(unittest.TestCase):
                 self.assertTrue(started.wait(timeout=10), self.request("/jobs"))
                 jobs = json.loads(self.request("/jobs"))
                 self.assertEqual([job["status"] for job in jobs], ["running", "queued", "queued", "queued"])
+                dashboard = json.loads(self.request("/dashboard"))
+                self.assertEqual(
+                    dashboard["stats"],
+                    {"found": 6, "needs_attention": 1, "completed": 0, "in_progress": 4},
+                )
+                self.assertEqual(dashboard["pending_sources"], [])
+                self.assertIn('data-source="Write failure.mkv" hidden', self.request("/"))
                 duplicates = json.loads(self.request("/convert", body=[select(failing), select(feature)]))
                 self.assertEqual(duplicates, {"queued": 0, "already_active": 2})
             finally:
@@ -244,6 +263,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual([job["status"] for job in jobs], ["failed", "completed", "completed", "skipped"])
         self.assertIn("ffmpeg:", jobs[0]["message"])
         self.assertIn("Output already exists", jobs[3]["message"])
+        dashboard = json.loads(self.request("/dashboard"))
+        self.assertEqual(
+            dashboard["stats"],
+            {"found": 6, "needs_attention": 2, "completed": 3, "in_progress": 0},
+        )
+        self.assertEqual(dashboard["pending_sources"], ["Write failure.mkv"])
         self.assertEqual(existing_output.read_bytes(), b"previous output")
         self.assertFalse((self.output / "Write failure.ac3.mkv").exists())
         self.assertEqual(list(self.output.rglob(".ac3fixer-*")), [])
@@ -256,7 +281,92 @@ class WorkflowTest(unittest.TestCase):
             stereo, self.output / "Stereo default.ac3.mkv",
             channels=2, language="jpn", make_default=True,
         )
-        self.assertIn("Films/Été à 東京.ac3.mkv", self.request("/scan", body=b""))
+        page = self.request("/scan", body=b"")
+        self.assertIn('data-source="Write failure.mkv"', page)
+        self.assertNotIn('data-source="Films/Été à 東京.mkv"', page)
+
+    def test_running_job_reports_progress_before_publish(self):
+        feature = self.source / "Progress.mkv"
+        make_fixture(feature, self.work_dir)
+        self.request("/scan", body=b"")
+        reached, resume = Event(), Event()
+        percentages = []
+        real_run = converter._run_conversion
+
+        def wait_for_observation(command, duration, report_progress):
+            def report(percent):
+                percentages.append(percent)
+                report_progress(percent)
+                if percent == 50:
+                    reached.set()
+                    if not resume.wait(timeout=10):
+                        raise RuntimeError("The test did not release the conversion in time.")
+
+            # Control the reports so the test does not depend on how fast FFmpeg runs.
+            converter._report_ffmpeg_progress(
+                ["out_time_us=N/A", "out_time_us=-1000", "out_time_us=1000000",
+                 "out_time_us=500000", "out_time_us=2000000"],
+                2_000_000, report,
+            )
+            real_run(command, duration, None)
+
+        result = self.output / "Progress.ac3.mkv"
+        with patch.object(converter, "_run_conversion", wait_for_observation):
+            try:
+                self.request("/convert", body=[{"source": feature.name, "track_index": 1}])
+                self.assertTrue(reached.wait(timeout=10), self.request("/jobs"))
+                dashboard = json.loads(self.request("/dashboard"))
+                job = dashboard["jobs"][0]
+                self.assertEqual(job["status"], "running")
+                self.assertEqual(job["progress"], 50)
+                self.assertEqual(dashboard["stats"]["in_progress"], 1)
+                self.assertFalse(result.exists())
+            finally:
+                resume.set()
+            job = self.wait_for_jobs(1)[0]
+
+        self.assertEqual(job["status"], "completed", job["message"])
+        self.assertEqual(job["progress"], 100)
+        self.assertEqual(percentages, [0, 50, 99])
+        result.unlink()
+        self.request("/scan", body=b"")
+        self.assertEqual(
+            json.loads(self.request("/dashboard"))["stats"],
+            {"found": 1, "needs_attention": 1, "completed": 0, "in_progress": 0},
+        )
+
+    def test_rescan_reuses_unchanged_audio_metadata(self):
+        feature = self.source / "Feature.mkv"
+        make_fixture(feature, self.work_dir)
+        other = self.source / "Other.mkv"
+        other.write_bytes(feature.read_bytes())
+        probed = []
+        original_probe = converter._probe
+
+        def record_probe(path):
+            probed.append(path)
+            return original_probe(path)
+
+        with patch.object(converter, "_probe", record_probe):
+            self.request("/scan", body=b"")
+            self.assertCountEqual(probed, [feature.resolve(), other.resolve()])
+
+            (self.output / "Feature.ac3.mkv").write_bytes(b"existing output")
+            page = self.request("/scan", body=b"")
+            self.assertNotIn('data-source="Feature.mkv"', page)
+            self.assertIn('data-source="Other.mkv"', page)
+            self.assertEqual(len(probed), 2)
+
+            info = other.stat()
+            os.utime(other, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+            self.request("/scan", body=b"")
+            self.assertEqual(probed[2:], [other.resolve()])
+
+            other.unlink()
+            page = self.request("/scan", body=b"")
+            self.assertNotIn("Other.mkv", page)
+            self.assertIn("No files waiting to be queued.", page)
+            self.assertEqual(len(probed), 3)
 
     def test_mono_without_default_audio(self):
         feature = self.source / "Mono.mkv"

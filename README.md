@@ -29,6 +29,7 @@ To use existing folders or a different port, put the following settings in a
 MEDIA_DIR=/mnt/media/movies
 OUTPUT_DIR=/mnt/media/ac3fixer
 AC3FIXER_PORT=8088
+SCAN_WORKERS=2
 ```
 
 Use separate host directories and keep the output outside the source library.
@@ -37,17 +38,32 @@ file atomically and keep any existing destination intact.
 
 ## Scan and convert
 
-1. Click **Scan media** to list MKV files in the source directory and its
-   subfolders. Each row shows the audio tracks and any scan error for that file.
+1. Click **Scan media** to inspect MKVs in the source directory and its
+   subfolders. **Files to convert** shows MKVs with a DTS or DTS-HD track that
+   still need an output. Scan errors appear separately.
 2. Pick a DTS track in each file you want to convert. Select **Make AC-3 default**
    on a file if Jellyfin should prefer the new track. Otherwise the existing
    audio default flags are preserved. AC-3 tracks already in the source stay in
    the output alongside the new track.
 3. Click **Queue selected files**. The **Conversion jobs** table updates as each
-   job runs. Files with an existing destination are skipped. A failed job shows
-   the error and the queue moves on to the next file.
+   job runs. The progress bar estimates completion from the source duration when
+   available. A job is completed after AC3Fixer verifies and publishes the output.
+   Files with an existing destination are skipped. A failed job shows the error
+   and the queue moves on to the next file.
 4. Use the verified MKV from the output directory. For example,
    `./data/Films/Movie.mkv` produces `./output/Films/Movie.ac3.mkv`.
+
+The conversion list updates when files enter the queue or finish. Failed files
+that can be retried return to the list.
+
+AC3Fixer probes up to two MKVs at a time. Set `SCAN_WORKERS=1` to limit scanning
+to one probe at a time on a busy network share. Repeat scans reuse audio metadata
+for unchanged files and probe new or changed files. The cache lasts until the
+app restarts.
+
+The dashboard shows MKVs found by the latest scan, files needing attention,
+completed outputs, and queued or running conversions. DTS candidates awaiting
+conversion, scan errors, and failed conversions appear in **Needs attention**.
 
 The added track keeps the selected language and is labeled **AC-3 Compatibility**.
 Mono and stereo keep their channel counts. Tracks above 5.1 are downmixed to

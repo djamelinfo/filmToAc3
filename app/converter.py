@@ -2,12 +2,19 @@ import json
 import os
 import subprocess
 from collections import Counter
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from stat import S_ISREG
+from tempfile import TemporaryDirectory, TemporaryFile
 
 
 AC3_TITLE = "AC-3 Compatibility"
+DEFAULT_SCAN_WORKERS = 2
+
+type SourceFingerprint = tuple[Path, int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -55,9 +62,53 @@ def _run(command: list[str], *, timeout: int | None = None) -> str:
     return result.stdout
 
 
+def _report_ffmpeg_progress(
+    lines: Iterable[str], duration_us: float, report_progress: Callable[[int], None]
+) -> None:
+    last_percent = 0
+    report_progress(last_percent)
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key != "out_time_us":
+            continue
+        try:
+            output_us = int(value)
+        except ValueError:
+            continue
+        # The job reaches 100% after verification and publication.
+        percent = int(min(99, max(0, 100 * output_us / duration_us)))
+        if percent > last_percent:
+            report_progress(percent)
+            last_percent = percent
+
+
+def _run_conversion(
+    command: list[str], duration: str | None, report_progress: Callable[[int], None] | None
+) -> None:
+    try:
+        duration_us = float(duration) * 1_000_000 if duration is not None else 0
+    except (TypeError, ValueError):
+        duration_us = 0
+    if report_progress is None or duration_us <= 0 or not isfinite(duration_us):
+        _run(command)
+        return
+
+    command = [command[0], "-progress", "pipe:1", "-nostats", *command[1:]]
+    with TemporaryFile() as errors:
+        with subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
+            encoding="utf-8", errors="replace",
+        ) as process:
+            _report_ffmpeg_progress(process.stdout, duration_us, report_progress)
+            if process.wait():
+                errors.seek(0)
+                detail = errors.read().decode("utf-8", errors="replace").strip() or f"exit code {process.returncode}"
+                raise RuntimeError(f"ffmpeg: {detail}")
+
+
 def _probe(path: Path) -> dict:
     data = json.loads(_run([
-        "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-show_chapters",
+        "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-show_chapters", "-show_format",
         "-protocol_whitelist", "file", "-f", "matroska", "-i", str(path),
     ], timeout=30))
     if not data.get("streams"):
@@ -126,9 +177,13 @@ def _verify_output(
 
 
 class MediaLibrary:
-    def __init__(self, source: Path, output: Path):
+    def __init__(self, source: Path, output: Path, *, scan_workers: int = DEFAULT_SCAN_WORKERS):
+        if scan_workers < 1:
+            raise ValueError("SCAN_WORKERS must be a positive integer.")
         self.source = source.resolve()
         self.output = output.resolve()
+        self.scan_workers = scan_workers
+        self._audio_cache: dict[SourceFingerprint, tuple[AudioTrack, ...]] = {}
         if (
             self.output.is_relative_to(self.source)
             or self.source.is_relative_to(self.output)
@@ -136,11 +191,14 @@ class MediaLibrary:
         ):
             raise ValueError("MEDIA_PATH and OUTPUT_PATH must be separate directories.")
 
-    def _source_file(self, relative: Path) -> Path:
+    def _source_file(self, relative: Path) -> tuple[Path, os.stat_result]:
         path = (self.source / relative).resolve(strict=True)
-        if not path.is_relative_to(self.source) or not path.is_file():
-            raise ValueError("Source must be a regular file inside the media directory.")
-        return path
+        if not path.is_relative_to(self.source):
+            raise ValueError("Source path must stay inside the media directory.")
+        info = path.stat()
+        if not S_ISREG(info.st_mode):
+            raise ValueError("Source must be a regular file.")
+        return path, info
 
     def _destination(self, relative: Path) -> Path:
         parent = (self.output / relative.parent).resolve()
@@ -148,36 +206,53 @@ class MediaLibrary:
             raise ValueError("Output path must stay inside the output directory.")
         return parent / relative.name
 
+    def _scan_file(self, relative: Path) -> tuple[MediaFile, SourceFingerprint | None]:
+        output = relative.with_suffix(".ac3.mkv")
+        tracks: tuple[AudioTrack, ...] = ()
+        fingerprint = None
+        output_exists = False
+        error = None
+        try:
+            path, info = self._source_file(relative)
+            key = (path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            cached = self._audio_cache.get(key)
+            tracks = cached if cached is not None else _audio_tracks(_probe(path))
+            fingerprint = key
+            output_exists = os.path.lexists(self._destination(output))
+        except (OSError, RuntimeError, ValueError) as exc:
+            error = str(exc)
+        return MediaFile(relative.as_posix(), output.as_posix(), tracks, output_exists, error), fingerprint
+
     def scan(self) -> tuple[dict[str, MediaFile], list[str]]:
-        files = []
+        candidates = []
         errors = []
 
         for folder, _, names in os.walk(self.source, onerror=lambda error: errors.append(str(error))):
-            for name in names:
-                if Path(name).suffix.lower() != ".mkv":
-                    continue
-                relative = (Path(folder) / name).relative_to(self.source)
-                output = relative.with_suffix(".ac3.mkv")
-                tracks = ()
-                output_exists = False
-                error = None
-                try:
-                    tracks = _audio_tracks(_probe(self._source_file(relative)))
-                    output_exists = os.path.lexists(self._destination(output))
-                except (OSError, RuntimeError, ValueError) as exc:
-                    error = str(exc)
-                files.append(MediaFile(relative.as_posix(), output.as_posix(), tracks, output_exists, error))
+            relative_folder = Path(folder).relative_to(self.source)
+            candidates.extend(relative_folder / name for name in names if Path(name).suffix.lower() == ".mkv")
+
+        files = []
+        audio_cache = {}
+        with ThreadPoolExecutor(max_workers=self.scan_workers, thread_name_prefix="scan") as pool:
+            for file, fingerprint in pool.map(self._scan_file, candidates):
+                files.append(file)
+                if fingerprint is not None:
+                    audio_cache[fingerprint] = file.tracks
+        self._audio_cache = audio_cache
 
         files.sort(key=lambda file: (file.source.casefold(), file.source))
         return {file.source: file for file in files}, errors
 
-    def convert(self, media: MediaFile, selected: AudioTrack, make_default: bool) -> bool:
+    def convert(
+        self, media: MediaFile, selected: AudioTrack, make_default: bool,
+        *, report_progress: Callable[[int], None] | None = None,
+    ) -> bool:
         """Publish a verified result, or return False if the destination exists."""
         destination = self._destination(Path(media.output))
         if os.path.lexists(destination):
             return False
 
-        source = self._source_file(Path(media.source))
+        source, _ = self._source_file(Path(media.source))
         original = _probe(source)
         audio = _audio_tracks(original)
         if selected not in audio:
@@ -231,7 +306,11 @@ class MediaLibrary:
                     command.extend([f"-metadata:s:t:{number}", f"{name}={value}"])
 
             temporary = Path(work_dir) / "output.part"
-            _run([*command, "-f", "matroska", str(temporary)])
+            _run_conversion(
+                [*command, "-f", "matroska", str(temporary)],
+                original.get("format", {}).get("duration"),
+                report_progress,
+            )
             _verify_output(original, _probe(temporary), selected, make_default)
 
             # A hard link publishes the complete file atomically and cannot replace an existing one.

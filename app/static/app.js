@@ -6,10 +6,39 @@ scanForm.addEventListener("submit", () => {
 });
 
 const conversionForm = document.querySelector("#conversion-form");
+const queueButton = conversionForm?.querySelector("button");
+const queueMessage = document.querySelector("#queue-message");
+const pendingEmpty = document.querySelector("#pending-empty");
+const choices = Array.from(conversionForm?.querySelectorAll(".track-choice") ?? []);
 const jobsTable = document.querySelector("#jobs-table");
 const jobsMessage = document.querySelector("#jobs-message");
+const statCounters = document.querySelectorAll("[data-stat]");
+const formatCount = new Intl.NumberFormat();
 let lastJobs;
 let refreshingJobs = false;
+let submitting = false;
+
+function selectedForQueue(choice) {
+    return choice.value !== "" && !choice.closest("tr").hidden;
+}
+
+function updateButton() {
+    queueButton.disabled = submitting || !choices.some(selectedForQueue);
+}
+
+function showPendingRows(pendingSources) {
+    if (!conversionForm) return;
+    const pending = new Set(pendingSources);
+    let hasPending = false;
+    for (const choice of choices) {
+        const row = choice.closest("tr");
+        row.hidden = !pending.has(row.dataset.source);
+        hasPending ||= !row.hidden;
+    }
+    conversionForm.hidden = !hasPending;
+    pendingEmpty.hidden = hasPending;
+    updateButton();
+}
 
 async function refreshJobs() {
     if (refreshingJobs) return;
@@ -17,7 +46,11 @@ async function refreshJobs() {
     try {
         const response = await fetch(jobsTable.dataset.url, { cache: "no-store" });
         if (!response.ok) throw new Error();
-        const jobs = await response.json();
+        const { jobs, stats, pending_sources: pendingSources } = await response.json();
+        for (const counter of statCounters) {
+            counter.textContent = formatCount.format(stats[counter.dataset.stat]);
+        }
+        showPendingRows(pendingSources);
         jobsMessage.textContent = jobs.length ? "" : "No conversions queued.";
         jobsTable.hidden = jobs.length === 0;
 
@@ -34,6 +67,22 @@ async function refreshJobs() {
             status.className = `status ${job.status}`;
             status.textContent = job.status;
             cell.append(status);
+            if (job.status === "running") {
+                const progress = document.createElement("progress");
+                progress.max = 100;
+                progress.setAttribute("aria-label", `Conversion progress for ${job.source}`);
+                const indicator = document.createElement("div");
+                indicator.className = "job-progress";
+                indicator.append(progress);
+                if (typeof job.progress === "number") {
+                    progress.value = job.progress;
+                    const percentage = document.createElement("span");
+                    percentage.textContent = `${job.progress}%`;
+                    percentage.setAttribute("aria-hidden", "true");
+                    indicator.append(percentage);
+                }
+                cell.append(indicator);
+            }
             if (job.message) {
                 const message = document.createElement("small");
                 message.textContent = job.message;
@@ -51,19 +100,10 @@ async function refreshJobs() {
 }
 
 if (conversionForm) {
-    const queueButton = conversionForm.querySelector("button");
-    const queueMessage = document.querySelector("#queue-message");
-    const choices = Array.from(conversionForm.querySelectorAll(".track-choice"));
-    let submitting = false;
-
-    function updateButton() {
-        queueButton.disabled = submitting || !choices.some(choice => choice.value !== "");
-    }
-
     conversionForm.addEventListener("change", updateButton);
     conversionForm.addEventListener("submit", async event => {
         event.preventDefault();
-        const selected = choices.filter(choice => choice.value !== "");
+        const selected = choices.filter(selectedForQueue);
         if (submitting || !selected.length) return;
         const selections = selected.map(choice => {
             const row = choice.closest("tr");

@@ -16,6 +16,34 @@ h1, h2, header p { margin: 0; }
 h1 { font-size: 2rem; }
 h2 { font-size: 1.25rem; }
 
+.library-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+    gap: .75rem;
+    margin: 1.5rem 0 0;
+}
+
+.library-stats > div {
+    padding: .8rem 1rem;
+    border: 1px solid #dbe2ed;
+    border-radius: .65rem;
+    background: #fff;
+}
+
+.library-stats dt { color: #4b5a6d; font-size: .9rem; font-weight: 600; }
+.library-stats dt a { color: inherit; text-underline-offset: .15em; }
+.library-stats dd {
+    margin: .2rem 0 0;
+    font-size: 1.75rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+
+.library-stats [data-stat="needs_attention"] { color: #934216; }
+.library-stats [data-stat="completed"] { color: #117043; }
+.library-stats [data-stat="in_progress"] { color: #154996; }
+
 section {
     margin-top: 1.5rem;
     padding: 1.25rem;
@@ -41,6 +69,11 @@ section {
 
 .paths dd { margin: 0; overflow-wrap: anywhere; }
 .paths dt { color: #4b5a6d; }
+
+.scan-errors { margin: 0 0 1rem; }
+.scan-errors summary { cursor: pointer; font-weight: 600; }
+.scan-errors li { overflow-wrap: anywhere; }
+.scan-errors small { display: block; }
 
 button, select { font: inherit; }
 button {
@@ -78,4 +111,16 @@ small, .error { white-space: pre-line; }
 .status.completed { color: #117043; }
 .status.failed, .error, .errors { color: #a51d23; }
 .status.running { color: #154996; }
-#jobs-message:empty { display: none; }
+
+.job-progress {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    min-width: 9rem;
+    margin-top: .25rem;
+    font-size: .85rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.job-progress progress { width: 100%; accent-color: #154996; }
+#jobs-message:empty, #queue-message:empty { display: none; }
