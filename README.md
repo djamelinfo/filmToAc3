@@ -7,14 +7,15 @@ Chapters and metadata carry over to the new file.
 
 ## Start with Docker Compose
 
-Run this from the repository root with a running Docker engine.
+From the repository root, start Compose with a running Docker engine. Compose
+pulls the published Linux amd64 image from GitHub Container Registry.
 
 ```sh
-docker compose up --build -d
+docker compose up -d
 ```
 
 Open [http://localhost:8088](http://localhost:8088). The port is bound to localhost
-by default. Docker installs FFmpeg and ffprobe in the image.
+by default. The published image includes FFmpeg and ffprobe.
 
 | Host directory | Container directory | Access |
 | --- | --- | --- |
@@ -66,13 +67,10 @@ version, `fix:` bumps the patch, and a `BREAKING CHANGE:` footer bumps the major
 Use a Conventional Commit title when squash-merging. Pushing a version tag
 manually also builds and publishes that image tag and the commit-SHA tag.
 
-After the first successful publish, pull the image with the following command.
+To download the release pinned in Compose before starting the service, run
+`docker compose pull`.
 For a private package, authenticate first with GitHub Container Registry.
 [Registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry)
-
-```sh
-docker pull ghcr.io/djamelinfo/filmtoac3:latest
-```
 
 ## Run the smoke tests
 
