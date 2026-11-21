@@ -1,0 +1,145 @@
+{% macro codec_name(track) -%}
+    {%- if track.is_dts -%}
+        {{ track.profile or "DTS" }}
+    {%- elif track.codec == "ac3" -%}
+        AC-3
+    {%- else -%}
+        {{ track.codec | upper }}
+    {%- endif -%}
+{%- endmacro %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AC3Fixer</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+    <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+</head>
+<body>
+    <main class="container">
+        <header>
+            <h1>AC3Fixer</h1>
+            <p>Add an AC-3 compatibility track to MKV files for Jellyfin.</p>
+        </header>
+
+        <section aria-labelledby="media-heading">
+            <div class="row">
+                <h2 id="media-heading">Media</h2>
+                <form id="scan-form" action="{{ url_for('scan') }}" method="post">
+                    <button type="submit">Scan media</button>
+                </form>
+            </div>
+            <dl class="paths">
+                <dt>Source directory</dt>
+                <dd><code>{{ media_path }}</code></dd>
+                <dt>Output directory</dt>
+                <dd><code>{{ output_path }}</code></dd>
+            </dl>
+            {% if scan_errors %}
+                <ul class="errors" aria-label="Scan errors">
+                    {% for error in scan_errors %}<li>{{ error }}</li>{% endfor %}
+                </ul>
+            {% endif %}
+
+            {% if media %}
+                <form id="conversion-form" action="{{ url_for('enqueue') }}">
+                    <div class="row">
+                        <button type="submit" disabled>Queue selected files</button>
+                        <span id="queue-message" role="status"></span>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="media-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Source file</th>
+                                    <th scope="col">Audio tracks</th>
+                                    <th scope="col">Conversion</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for file in media %}
+                                    {% set candidates = file.tracks | selectattr('is_dts') | list %}
+                                    <tr data-source="{{ file.source }}">
+                                        <th scope="row">
+                                            <code>{{ file.source }}</code>
+                                            {% if file.output_exists %}
+                                                <small>Output already exists at <code>{{ file.output }}</code></small>
+                                            {% endif %}
+                                        </th>
+                                        <td>
+                                            {% if file.tracks %}
+                                                <ul class="tracks">
+                                                    {% for track in file.tracks %}
+                                                        <li>
+                                                            <strong>#{{ track.index }} {{ codec_name(track) }}</strong>
+                                                            <span class="track-details">
+                                                                {% if track.language %}{{ track.language }}{% endif %}
+                                                                {% if track.channels %} · {{ track.channels }} ch{% endif %}
+                                                                {% if track.default is not none %}
+                                                                    · {{ 'Default' if track.default else 'Non-default' }}
+                                                                {% endif %}
+                                                            </span>
+                                                            {% if track.title %}<small>{{ track.title }}</small>{% endif %}
+                                                        </li>
+                                                    {% endfor %}
+                                                </ul>
+                                            {% elif not file.error %}
+                                                <span class="muted">No audio tracks</span>
+                                            {% endif %}
+                                            {% if file.error %}
+                                                <p class="error">Scan error. {{ file.error }}</p>
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            {% if candidates and not file.error %}
+                                                <label class="choice">
+                                                    DTS track
+                                                    <select class="track-choice" aria-label="DTS track for {{ file.source }}">
+                                                        <option value="">Do not queue</option>
+                                                        {% for track in candidates %}
+                                                            <option value="{{ track.index }}">#{{ track.index }} {{ codec_name(track) }}{% if track.language %} · {{ track.language }}{% endif %}{% if track.title %} · {{ track.title }}{% endif %}</option>
+                                                        {% endfor %}
+                                                    </select>
+                                                </label>
+                                                <label class="checkbox">
+                                                    <input type="checkbox" class="make-default">
+                                                    Make AC-3 default
+                                                </label>
+                                            {% elif not file.error %}
+                                                <span class="muted">No DTS tracks</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </form>
+            {% elif scanned %}
+                <p class="muted">No MKV files found.</p>
+            {% else %}
+                <p class="muted">Scan media to list the MKV files in your source directory.</p>
+            {% endif %}
+        </section>
+
+        <section aria-labelledby="jobs-heading">
+            <h2 id="jobs-heading">Conversion jobs</h2>
+            <p id="jobs-message" class="muted" role="status">Loading jobs…</p>
+            <div class="table-wrap">
+                <table id="jobs-table" data-url="{{ url_for('jobs') }}" hidden>
+                    <thead>
+                        <tr>
+                            <th scope="col">Source file</th>
+                            <th scope="col">DTS track</th>
+                            <th scope="col">Output file</th>
+                            <th scope="col">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</body>
+</html>

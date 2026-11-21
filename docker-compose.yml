@@ -1,0 +1,18 @@
+services:
+  ac3fixer:
+    build: .
+    init: true
+    ports:
+      - "127.0.0.1:${AC3FIXER_PORT:-8088}:8000"
+    environment:
+      MEDIA_PATH: /data
+      OUTPUT_PATH: /output
+    volumes:
+      - type: bind
+        source: "${MEDIA_DIR:-./data}"
+        target: /data
+        read_only: true
+      - type: bind
+        source: "${OUTPUT_DIR:-./output}"
+        target: /output
+    restart: unless-stopped
