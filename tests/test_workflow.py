@@ -258,6 +258,37 @@ class WorkflowTest(unittest.TestCase):
         )
         self.assertIn("Films/Été à 東京.ac3.mkv", self.request("/scan", body=b""))
 
+    def test_rescan_reuses_unchanged_audio_metadata(self):
+        feature = self.source / "Feature.mkv"
+        make_fixture(feature, self.work_dir)
+        other = self.source / "Other.mkv"
+        other.write_bytes(feature.read_bytes())
+        probed = []
+        original_probe = converter._probe
+
+        def record_probe(path):
+            probed.append(path)
+            return original_probe(path)
+
+        with patch.object(converter, "_probe", record_probe):
+            self.request("/scan", body=b"")
+            self.assertCountEqual(probed, [feature.resolve(), other.resolve()])
+
+            (self.output / "Feature.ac3.mkv").write_bytes(b"existing output")
+            page = self.request("/scan", body=b"")
+            self.assertIn("Feature.ac3.mkv", page)
+            self.assertEqual(len(probed), 2)
+
+            info = other.stat()
+            os.utime(other, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+            self.request("/scan", body=b"")
+            self.assertEqual(probed[2:], [other.resolve()])
+
+            other.unlink()
+            page = self.request("/scan", body=b"")
+            self.assertNotIn("Other.mkv", page)
+            self.assertEqual(len(probed), 3)
+
     def test_mono_without_default_audio(self):
         feature = self.source / "Mono.mkv"
         make_fixture(feature, self.work_dir, layout="mono", default="0")

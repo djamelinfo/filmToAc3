@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from .converter import AudioTrack, MediaFile, MediaLibrary
+from .converter import DEFAULT_SCAN_WORKERS, AudioTrack, MediaFile, MediaLibrary
 
 
 class Selection(BaseModel):
@@ -92,6 +92,7 @@ async def lifespan(app: FastAPI):
     library = MediaLibrary(
         Path(os.getenv("MEDIA_PATH", "/data")),
         Path(os.getenv("OUTPUT_PATH", "/output")),
+        scan_workers=int(os.getenv("SCAN_WORKERS", str(DEFAULT_SCAN_WORKERS))),
     )
     state = AppState(library)
     app.state.ac3fixer = state

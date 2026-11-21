@@ -29,6 +29,7 @@ To use existing folders or a different port, put the following settings in a
 MEDIA_DIR=/mnt/media/movies
 OUTPUT_DIR=/mnt/media/ac3fixer
 AC3FIXER_PORT=8088
+SCAN_WORKERS=2
 ```
 
 Use separate host directories and keep the output outside the source library.
@@ -48,6 +49,11 @@ file atomically and keep any existing destination intact.
    the error and the queue moves on to the next file.
 4. Use the verified MKV from the output directory. For example,
    `./data/Films/Movie.mkv` produces `./output/Films/Movie.ac3.mkv`.
+
+AC3Fixer probes up to two MKVs at a time. Set `SCAN_WORKERS=1` to limit scanning
+to one probe at a time on a busy network share. Repeat scans reuse audio metadata
+for unchanged files and probe new or changed files. The cache lasts until the
+app restarts.
 
 The added track keeps the selected language and is labeled **AC-3 Compatibility**.
 Mono and stereo keep their channel counts. Tracks above 5.1 are downmixed to
