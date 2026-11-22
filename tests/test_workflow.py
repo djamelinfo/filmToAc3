@@ -94,7 +94,7 @@ class ServerTestCase(unittest.TestCase):
     read_only = True
 
     def setUp(self):
-        self.work_dir = Path(self.enterContext(TemporaryDirectory()))
+        self.work_dir = Path(self.enterContext(TemporaryDirectory())).resolve()
         self.source = self.work_dir / "source"
         self.output = self.work_dir / "output"
         self.source.mkdir()
