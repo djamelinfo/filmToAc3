@@ -123,4 +123,7 @@ small, .error { white-space: pre-line; }
 }
 
 .job-progress progress { width: 100%; accent-color: #154996; }
-#jobs-message:empty, #queue-message:empty { display: none; }
+.film-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.delete-original { background: white; color: #a51d23; border-color: #ba7377; }
+.delete-original:hover:enabled { background: #fbecee; }
+#jobs-message:empty, #queue-message:empty, #film-message:empty { display: none; }

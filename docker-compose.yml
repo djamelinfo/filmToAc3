@@ -1,18 +1,19 @@
 services:
   ac3fixer:
-    image: ghcr.io/djamelinfo/filmtoac3:v1.0.0
+    image: ghcr.io/djamelinfo/filmtoac3:${AC3FIXER_TAG:-latest}
     init: true
     ports:
       - "127.0.0.1:${AC3FIXER_PORT:-8088}:8000"
     environment:
       MEDIA_PATH: /data
       OUTPUT_PATH: /output
+      MEDIA_READ_ONLY: "${MEDIA_READ_ONLY:-true}"
       SCAN_WORKERS: "${SCAN_WORKERS:-2}"
     volumes:
       - type: bind
         source: "${MEDIA_DIR:-./data}"
         target: /data
-        read_only: true
+        read_only: ${MEDIA_READ_ONLY:-true}
       - type: bind
         source: "${OUTPUT_DIR:-./output}"
         target: /output

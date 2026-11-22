@@ -4,7 +4,8 @@ import subprocess
 from collections import Counter
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from math import isfinite
 from pathlib import Path
 from stat import S_ISREG
@@ -12,6 +13,8 @@ from tempfile import TemporaryDirectory, TemporaryFile
 
 
 AC3_TITLE = "AC-3 Compatibility"
+OUTPUT_TAG = "AC3FIXER_PROCESSED"
+SOURCE_TAG = "AC3FIXER_SOURCE"
 DEFAULT_SCAN_WORKERS = 2
 
 type SourceFingerprint = tuple[Path, int, int, int, int, int]
@@ -40,6 +43,7 @@ class MediaFile:
     tracks: tuple[AudioTrack, ...] = ()
     output_exists: bool = False
     error: str | None = None
+    output_in_library: bool = False
 
 
 def _run(command: list[str], *, timeout: int | None = None) -> str:
@@ -106,9 +110,10 @@ def _run_conversion(
                 raise RuntimeError(f"ffmpeg: {detail}")
 
 
-def _probe(path: Path) -> dict:
+def _probe(path: Path, *, data_hash: bool = False) -> dict:
     data = json.loads(_run([
         "ffprobe", "-v", "error", "-of", "json", "-show_streams", "-show_chapters", "-show_format",
+        *(["-show_data_hash", "sha256"] if data_hash else []),
         "-protocol_whitelist", "file", "-f", "matroska", "-i", str(path),
     ], timeout=30))
     if not data.get("streams"):
@@ -133,6 +138,34 @@ def _audio_tracks(probe: dict) -> tuple[AudioTrack, ...]:
             default=None if default is None else bool(default),
         ))
     return tuple(tracks)
+
+
+def _format_tag(probe: dict, name: str) -> str | None:
+    return next((v for k, v in probe.get("format", {}).get("tags", {}).items() if k.upper() == name), None)
+
+
+def _source_stamp(relative: str, info: os.stat_result) -> str:
+    return sha256(f"{relative}\0{info.st_size}\0{info.st_mtime_ns}".encode("utf-8")).hexdigest()
+
+
+def _matching_dts(tracks: tuple[AudioTrack, ...], added: AudioTrack) -> AudioTrack | None:
+    return next((
+        track for track in tracks
+        if track.is_dts and (track.channels is None or min(track.channels, 6) == added.channels)
+        and (track.language or "und") == (added.language or "und")
+    ), None)
+
+
+def _source_tracks(path: Path, probe: dict) -> tuple[AudioTrack, ...] | None:
+    if _format_tag(probe, OUTPUT_TAG) == "1":
+        return None
+    tracks = _audio_tracks(probe)
+    # Earlier versions used this filename and track title before writing the container tag.
+    if tracks and path.name.lower().endswith(".ac3.mkv"):
+        added = tracks[-1]
+        if added.codec == "ac3" and added.title == AC3_TITLE and _matching_dts(tracks[:-1], added):
+            return None
+    return tracks
 
 
 def _verify_output(
@@ -176,6 +209,60 @@ def _verify_output(
             raise RuntimeError("Output verification failed: chapter timing changed.")
 
 
+def _copied_streams(data: dict, exclude: int | None = None) -> list[dict]:
+    # FFmpeg groups attachments after the new audio track when remuxing.
+    return sorted(
+        (s for s in data["streams"] if s["index"] != exclude),
+        key=lambda s: (s["codec_type"], s.get("disposition", {}).get("attached_pic", 0), s["index"]),
+    )
+
+
+def _stream_hashes(path: Path, streams: list[dict], *, decode_audio: int | None = None) -> str:
+    maps = []
+    for stream in streams:
+        if stream["codec_type"] != "attachment":
+            maps.extend(["-map", f"0:{stream['index']}"])
+    decode = ["-map", f"0:{decode_audio}", "-f", "null", "-"] if decode_audio is not None else []
+    return _run([
+        "ffmpeg", "-v", "error", "-nostdin", "-xerror", "-abort_on", "empty_output",
+        "-protocol_whitelist", "file",
+        "-f", "matroska", "-i", str(path), *maps, "-c", "copy", "-f", "streamhash", "-", *decode,
+    ])
+
+
+def verify_converted_film(output: Path, original: Path | None, root: Path, *, deleting: bool) -> None:
+    result = _probe(output, data_hash=True)
+    audio = _audio_tracks(result)
+    if (
+        _source_tracks(output, result) is not None or not audio
+        or audio[-1].codec != "ac3" or audio[-1].title != AC3_TITLE
+    ):
+        raise ValueError("This file is not a verified AC3Fixer output.")
+    if original is None:
+        return
+    if original.samefile(output):
+        raise ValueError("The original and the converted file refer to the same file.")
+    stamp = _format_tag(result, SOURCE_TAG)
+    if stamp is not None and stamp != _source_stamp(original.relative_to(root).as_posix(), original.stat()):
+        raise ValueError("The original has changed since conversion. Both files were kept.")
+    before = _probe(original, data_hash=True)
+    tracks = _source_tracks(original, before)
+    added = audio[-1]
+    selected = _matching_dts(tracks or (), added)
+    if selected is None:
+        raise ValueError("The converted audio does not match a DTS track in this original.")
+    _verify_output(before, result, selected, bool(added.default))
+    if deleting or stamp is None:
+        old_streams = _copied_streams(before)
+        new_streams = _copied_streams(result, added.index)
+        # Attachments are stored in codec extradata. The other streams also have packets.
+        if (
+            [s.get("extradata_hash") for s in old_streams] != [s.get("extradata_hash") for s in new_streams]
+            or _stream_hashes(original, old_streams) != _stream_hashes(output, new_streams, decode_audio=added.index)
+        ):
+            raise ValueError("The converted copy does not contain the same original stream data. Both files were kept.")
+
+
 class MediaLibrary:
     def __init__(self, source: Path, output: Path, *, scan_workers: int = DEFAULT_SCAN_WORKERS):
         if scan_workers < 1:
@@ -183,7 +270,7 @@ class MediaLibrary:
         self.source = source.resolve()
         self.output = output.resolve()
         self.scan_workers = scan_workers
-        self._audio_cache: dict[SourceFingerprint, tuple[AudioTrack, ...]] = {}
+        self._audio_cache: dict[SourceFingerprint, tuple[AudioTrack, ...] | None] = {}
         if (
             self.output.is_relative_to(self.source)
             or self.source.is_relative_to(self.output)
@@ -206,7 +293,7 @@ class MediaLibrary:
             raise ValueError("Output path must stay inside the output directory.")
         return parent / relative.name
 
-    def _scan_file(self, relative: Path) -> tuple[MediaFile, SourceFingerprint | None]:
+    def _scan_file(self, relative: Path) -> tuple[MediaFile | None, SourceFingerprint | None]:
         output = relative.with_suffix(".ac3.mkv")
         tracks: tuple[AudioTrack, ...] = ()
         fingerprint = None
@@ -215,8 +302,12 @@ class MediaLibrary:
         try:
             path, info = self._source_file(relative)
             key = (path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-            cached = self._audio_cache.get(key)
-            tracks = cached if cached is not None else _audio_tracks(_probe(path))
+            if key in self._audio_cache:
+                tracks = self._audio_cache[key]
+            else:
+                tracks = _source_tracks(path, _probe(path))
+            if tracks is None:
+                return None, key
             fingerprint = key
             output_exists = os.path.lexists(self._destination(output))
         except (OSError, RuntimeError, ValueError) as exc:
@@ -233,15 +324,22 @@ class MediaLibrary:
 
         files = []
         audio_cache = {}
+        finished_paths = set()
         with ThreadPoolExecutor(max_workers=self.scan_workers, thread_name_prefix="scan") as pool:
-            for file, fingerprint in pool.map(self._scan_file, candidates):
-                files.append(file)
+            for relative, (file, fingerprint) in zip(candidates, pool.map(self._scan_file, candidates)):
+                if file is not None:
+                    files.append(file)
+                else:
+                    finished_paths.add(relative)
                 if fingerprint is not None:
-                    audio_cache[fingerprint] = file.tracks
+                    audio_cache[fingerprint] = file.tracks if file is not None else None
         self._audio_cache = audio_cache
 
         files.sort(key=lambda file: (file.source.casefold(), file.source))
-        return {file.source: file for file in files}, errors
+        return {
+            file.source: replace(file, output_in_library=True) if Path(file.output) in finished_paths else file
+            for file in files
+        }, errors
 
     def convert(
         self, media: MediaFile, selected: AudioTrack, make_default: bool,
@@ -251,10 +349,22 @@ class MediaLibrary:
         destination = self._destination(Path(media.output))
         if os.path.lexists(destination):
             return False
+        relative_output = Path(media.output)
+        if (self.source / relative_output).is_file():
+            try:
+                sibling, _ = self._source_file(relative_output)
+                if _source_tracks(sibling, _probe(sibling)) is None:
+                    return False
+            except (OSError, RuntimeError, ValueError):
+                # An unreadable neighbour does not prevent publishing into the separate output folder.
+                pass
 
-        source, _ = self._source_file(Path(media.source))
+        source, source_info = self._source_file(Path(media.source))
+        stamp = _source_stamp(media.source, source_info)
         original = _probe(source)
-        audio = _audio_tracks(original)
+        audio = _source_tracks(source, original)
+        if audio is None:
+            raise RuntimeError("This file is already an AC3Fixer output. Scan media again.")
         if selected not in audio:
             raise RuntimeError("The selected DTS track changed. Scan media and select it again.")
         new_audio = f"a:{len(audio)}"
@@ -278,6 +388,8 @@ class MediaLibrary:
             *ffmpeg_input,
             *stream_maps, "-map", f"0:{selected.index}", *attachment_maps,
             "-map_metadata", "0", "-map_chapters", "0",
+            "-metadata", f"{OUTPUT_TAG}=1",
+            "-metadata", f"{SOURCE_TAG}={stamp}",
             "-c", "copy", f"-c:{new_audio}", "ac3", f"-b:{new_audio}", bitrate,
             f"-metadata:s:{new_audio}", f"title={AC3_TITLE}",
             f"-metadata:s:{new_audio}", f"language={selected.language or 'und'}",
@@ -311,7 +423,12 @@ class MediaLibrary:
                 original.get("format", {}).get("duration"),
                 report_progress,
             )
-            _verify_output(original, _probe(temporary), selected, make_default)
+            result = _probe(temporary)
+            _verify_output(original, result, selected, make_default)
+            if _format_tag(result, OUTPUT_TAG) != "1" or _format_tag(result, SOURCE_TAG) != stamp:
+                raise RuntimeError("Output verification failed: the AC3Fixer metadata is missing.")
+            if _source_stamp(media.source, source.stat()) != stamp:
+                raise RuntimeError("The original changed during conversion. Scan media and try again.")
 
             # A hard link publishes the complete file atomically and cannot replace an existing one.
             try:
