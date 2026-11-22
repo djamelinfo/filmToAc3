@@ -2,6 +2,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -200,7 +201,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AC3Fixer", lifespan=lifespan)
 app_dir = Path(__file__).parent
-app.mount("/static", StaticFiles(directory=app_dir / "static"), name="static")
+static_dir = app_dir / "static"
+asset_versions = {
+    name: sha256((static_dir / name).read_bytes()).hexdigest()[:16]
+    for name in ("app.js", "styles.css")
+}
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=app_dir / "templates")
 
 
@@ -220,7 +226,13 @@ def index(request: Request):
             "stats": stats,
             "manage_originals": state.manage_originals,
         }
-    return templates.TemplateResponse(request=request, name="index.html", context=context)
+    context["assets"] = {
+        name: request.url_for("static", path=name).include_query_params(v=version)
+        for name, version in asset_versions.items()
+    }
+    return templates.TemplateResponse(
+        request=request, name="index.html", context=context, headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/scan")
