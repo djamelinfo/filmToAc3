@@ -147,6 +147,22 @@ class ServerTestCase(unittest.TestCase):
 
 
 class WorkflowTest(ServerTestCase):
+    def test_page_references_the_current_static_assets(self):
+        with urlopen(self.base_url + "/", timeout=10) as response:
+            page = response.read().decode("utf-8")
+            self.assertEqual(response.headers.get("Cache-Control"), "no-cache")
+
+        for name, attribute in (("app.js", "src"), ("styles.css", "href")):
+            with self.subTest(asset=name):
+                url = f"{self.base_url}/static/{name}"
+                with urlopen(url, timeout=10) as response:
+                    content = response.read()
+                version = hashlib.sha256(content).hexdigest()[:16]
+                versioned_url = f"{url}?v={version}"
+                self.assertIn(f'{attribute}="{versioned_url}"', page)
+                with urlopen(versioned_url, timeout=10) as response:
+                    self.assertEqual(response.read(), content)
+
     def assert_remux(self, source, result, *, channels, language, make_default):
         original = probe(source)
         output = probe(result)
