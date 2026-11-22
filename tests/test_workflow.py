@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -9,12 +10,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import uvicorn
 
-from app import converter
+from app import converter, films
 from app.main import app
 
 
@@ -89,15 +90,18 @@ def snapshot(root):
     }
 
 
-class WorkflowTest(unittest.TestCase):
+class ServerTestCase(unittest.TestCase):
+    read_only = True
+
     def setUp(self):
-        self.work_dir = Path(self.enterContext(TemporaryDirectory()))
+        self.work_dir = Path(self.enterContext(TemporaryDirectory())).resolve()
         self.source = self.work_dir / "source"
         self.output = self.work_dir / "output"
         self.source.mkdir()
         self.output.mkdir()
         self.enterContext(patch.dict(os.environ, {
             "MEDIA_PATH": str(self.source), "OUTPUT_PATH": str(self.output),
+            "MEDIA_READ_ONLY": str(self.read_only).lower(),
         }))
 
         listener = self.enterContext(socket.socket())
@@ -123,7 +127,7 @@ class WorkflowTest(unittest.TestCase):
 
     def request(self, path, *, body=None):
         headers = {}
-        if isinstance(body, list):
+        if isinstance(body, (list, dict)):
             body = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         with urlopen(Request(self.base_url + path, data=body, headers=headers), timeout=10) as response:
@@ -138,6 +142,11 @@ class WorkflowTest(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"Jobs did not finish: {jobs}")
 
+    def action(self, action, source, output):
+        return self.request("/films/action", body={"source": source, "output": output, "action": action})
+
+
+class WorkflowTest(ServerTestCase):
     def assert_remux(self, source, result, *, channels, language, make_default):
         original = probe(source)
         output = probe(result)
@@ -328,6 +337,11 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(job["status"], "completed", job["message"])
         self.assertEqual(job["progress"], 100)
         self.assertEqual(percentages, [0, 50, 99])
+        with self.assertRaises(HTTPError) as error:
+            self.action("delete_original", feature.name, result.name)
+        self.assertEqual(error.exception.code, 403)
+        self.assertTrue(feature.is_file())
+        self.assertTrue(result.is_file())
         result.unlink()
         self.request("/scan", body=b"")
         self.assertEqual(
@@ -378,6 +392,156 @@ class WorkflowTest(unittest.TestCase):
         self.assert_remux(
             feature, self.output / "Mono.ac3.mkv", channels=1, language="fra", make_default=False,
         )
+
+
+class FilmManagementTest(ServerTestCase):
+    read_only = False
+    relative = "Films/Été à 東京.MKV"
+    output_name = "Films/Été à 東京.ac3.mkv"
+
+    def convert_fixture(self):
+        source = self.source / self.relative
+        make_fixture(source, self.work_dir)
+        self.request("/scan", body=b"")
+        self.request("/convert", body=[{"source": self.relative, "track_index": 1}])
+        job, = self.wait_for_jobs(1)
+        self.assertEqual(job["status"], "completed", job["message"])
+        return source, self.output / self.output_name, self.source / self.output_name
+
+    def test_move_then_delete_and_ignore_even_after_rename(self):
+        original, staged, sibling = self.convert_fixture()
+        saved = original.read_bytes()
+        converted = staged.read_bytes()
+        self.assertEqual(probe(staged)["format"]["tags"]["AC3FIXER_PROCESSED"], "1")
+        self.action("move", self.relative, self.output_name)
+        self.assertFalse(staged.exists())
+        self.assertEqual(original.read_bytes(), saved)
+        self.assertEqual(sibling.read_bytes(), converted)
+        genuine = self.source / "Another.ac3.mkv"
+        # A similarly named English AC-3 track still leaves the French DTS eligible.
+        run("ffmpeg", "-v", "error", "-i", str(original), "-map", "0:v:0", "-map", "0:a:0",
+            "-map", "0:a:1", "-c", "copy", "-metadata:s:a:1", "title=AC-3 Compatibility", str(genuine))
+        (self.source / "Renamed copy.mkv").write_bytes(converted)
+        self.request("/scan", body=b"")
+        with patch.object(converter, "_probe", side_effect=AssertionError("unexpected warm probe")):
+            self.request("/scan", body=b"")
+        dashboard = json.loads(self.request("/dashboard"))
+        self.assertEqual(dashboard["pending_sources"], [genuine.name])
+        self.assertEqual(dashboard["stats"]["found"], 2)
+        self.assertEqual(dashboard["stats"]["completed"], 1)
+        self.assertEqual(dashboard["converted_films"], [{
+            "source": self.relative, "output": self.output_name, "in_library": True, "in_output": False,
+        }])
+        self.request("/convert", body=[{"source": self.relative, "track_index": 1}])
+        self.assertEqual(self.wait_for_jobs(2)[1]["status"], "skipped")
+        self.action("delete_original", self.relative, self.output_name)
+        self.assertFalse(original.exists())
+        self.assertEqual(sibling.read_bytes(), converted)
+        self.assertFalse(staged.exists())
+        self.request("/scan", body=b"")
+        self.assertEqual(json.loads(self.request("/dashboard"))["pending_sources"], [genuine.name])
+
+    def test_delete_then_move_across_mounts_and_retry_failed_copy(self):
+        original, staged, sibling = self.convert_fixture()
+        converted = staged.read_bytes()
+        self.action("delete_original", self.relative, self.output_name)
+        self.assertFalse(original.exists())
+        self.assertEqual(staged.read_bytes(), converted)
+        self.request("/scan", body=b"")
+        self.assertIsNone(json.loads(self.request("/dashboard"))["converted_films"][0]["source"])
+        link = os.link
+
+        def cross_mount(before, after):
+            if before == staged.resolve():
+                raise OSError(errno.EXDEV, "different filesystem")
+            link(before, after)
+
+        with patch.object(films.os, "link", cross_mount):
+            with patch.object(films.shutil, "copyfile", side_effect=lambda src, dst: dst.write_bytes(b"partial")):
+                with self.assertRaises(HTTPError) as error:
+                    self.action("move", None, self.output_name)
+                self.assertIn("failed verification", error.exception.read().decode())
+            self.assertFalse(sibling.exists())
+            self.assertEqual(staged.read_bytes(), converted)
+            self.assertFalse(list(sibling.parent.glob(".ac3fixer-*")))
+            self.action("move", None, self.output_name)
+        self.assertFalse(staged.exists())
+        self.assertEqual(sibling.read_bytes(), converted)
+
+    def test_refuses_conflicts_changed_original_and_damaged_output(self):
+        original, staged, sibling = self.convert_fixture()
+        sibling.write_bytes(b"existing destination")
+        with self.assertRaises(HTTPError) as error:
+            self.action("move", self.relative, self.output_name)
+        self.assertIn("already exists", error.exception.read().decode())
+        self.assertEqual(sibling.read_bytes(), b"existing destination")
+        saved = original.stat()
+        os.utime(original, ns=(saved.st_atime_ns, saved.st_mtime_ns + 2_000_000_000))
+        with self.assertRaises(HTTPError) as error:
+            self.action("delete_original", self.relative, self.output_name)
+        self.assertIn("changed since conversion", error.exception.read().decode())
+        os.utime(original, ns=(saved.st_atime_ns, saved.st_mtime_ns))
+        data = staged.read_bytes()
+        staged.write_bytes(data[:len(data) // 2])
+        with self.assertRaises(HTTPError) as error:
+            self.action("delete_original", self.relative, self.output_name)
+        self.assertEqual(error.exception.code, 409)
+        self.assertTrue(original.is_file())
+        with self.assertRaises(HTTPError) as error:
+            self.action("delete_original", "../outside.mkv", self.output_name)
+        self.assertEqual(error.exception.code, 404)
+
+    def test_previous_release_output_can_be_managed(self):
+        original, staged, sibling = self.convert_fixture()
+        # Remove just the two application tag names without remuxing any streams or attachments.
+        data = staged.read_bytes()
+        for tag in (converter.OUTPUT_TAG, converter.SOURCE_TAG):
+            data = data.replace(tag.encode(), b"X" * len(tag))
+        staged.write_bytes(data)
+        self.assertNotIn("AC3FIXER_PROCESSED", probe(staged)["format"]["tags"])
+        self.action("move", self.relative, self.output_name)
+        self.request("/scan", body=b"")
+        self.assertEqual(json.loads(self.request("/dashboard"))["pending_sources"], [])
+        self.action("delete_original", self.relative, self.output_name)
+        self.assertTrue(sibling.is_file())
+        self.assertFalse(original.exists())
+
+    def test_interrupted_move_resumes_without_overwriting(self):
+        original, staged, sibling = self.convert_fixture()
+        with self.assertRaisesRegex(ValueError, "same directory entry"):
+            films._publish_in_library(staged, staged, films._version(staged))
+        unlink = Path.unlink
+
+        def fail_staged_unlink(path, *args, **kwargs):
+            if path == staged.resolve():
+                raise PermissionError("staged file is busy")
+            return unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_staged_unlink):
+            with self.assertRaises(HTTPError) as error:
+                self.action("move", self.relative, self.output_name)
+            self.assertIn("staged file is busy", error.exception.read().decode())
+        self.assertEqual(staged.read_bytes(), sibling.read_bytes())
+        self.request("/scan", body=b"")
+        film, = json.loads(self.request("/dashboard"))["converted_films"]
+        self.assertTrue(film["in_output"] and film["in_library"])
+        self.action("move", self.relative, self.output_name)
+        self.assertFalse(staged.exists())
+        self.assertTrue(sibling.is_file() and original.is_file())
+
+    def test_symlink_target_is_refused(self):
+        original, staged, sibling = self.convert_fixture()
+        outside = self.work_dir / "separate.mkv"
+        outside.write_bytes(b"separate film")
+        try:
+            sibling.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest(f"Creating symbolic links is unavailable: {exc}")
+        with self.assertRaises(HTTPError) as error:
+            self.action("move", self.relative, self.output_name)
+        self.assertEqual(error.exception.code, 409)
+        self.assertEqual(outside.read_bytes(), b"separate film")
+        self.assertTrue(staged.is_file() and original.is_file())
 
 
 if __name__ == "__main__":

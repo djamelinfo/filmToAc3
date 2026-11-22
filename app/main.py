@@ -1,7 +1,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -13,12 +13,19 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from .converter import DEFAULT_SCAN_WORKERS, AudioTrack, MediaFile, MediaLibrary
+from .films import ConvertedFilm, FilmAction, manage_film, staged_without_originals
 
 
 class Selection(BaseModel):
     source: str
     track_index: int = Field(ge=0)
     make_default: bool = False
+
+
+class FilmRequest(BaseModel):
+    action: FilmAction
+    output: str
+    source: str | None
 
 
 @dataclass
@@ -32,8 +39,10 @@ class Job:
 
 
 class AppState:
-    def __init__(self, library: MediaLibrary):
+    def __init__(self, library: MediaLibrary, *, manage_originals: bool = False):
         self.library = library
+        self.manage_originals = manage_originals
+        self.staged_only: set[str] = set()
         self.media: dict[str, MediaFile] = {}
         self.scan_errors: list[str] = []
         self.scanned = False
@@ -110,7 +119,7 @@ class AppState:
         conversion_files = []
         pending_sources = []
         for source, file in self.media.items():
-            has_output = file.output_exists or source in self.recent_outputs
+            has_output = file.output_exists or file.output_in_library or source in self.recent_outputs
             can_convert = not file.error and not has_output and any(track.is_dts for track in file.tracks)
             if can_convert:
                 # Keep active rows available to show again if their job fails.
@@ -125,6 +134,54 @@ class AppState:
                 stats["completed"] += 1
         return stats, conversion_files, pending_sources
 
+    def converted_films(self) -> list[ConvertedFilm]:
+        if not self.manage_originals:
+            return []
+        films = []
+        for source, media in self.media.items():
+            staged = media.output_exists or (source in self.recent_outputs and not media.output_in_library)
+            if not media.error and (staged or media.output_in_library):
+                films.append(ConvertedFilm(media.output, source, staged, media.output_in_library))
+        films.extend(ConvertedFilm(output, None, True, False) for output in sorted(self.staged_only))
+        return films
+
+    def manage(self, change: FilmRequest) -> None:
+        if not self.manage_originals:
+            raise HTTPException(403, "The media library is read-only.")
+        output = Path(change.output)
+        with self.scan_lock:
+            with self.lock:
+                film = next((item for item in self.converted_films()
+                             if item.output == change.output and item.source == change.source), None)
+                if film is None:
+                    raise HTTPException(404, "Scan media to locate this converted film.")
+                if output in self.active_outputs:
+                    raise HTTPException(409, "This film is already busy.")
+                if change.action == "move" and not film.in_output:
+                    raise HTTPException(409, "The converted file is already in the library.")
+                if change.action == "delete_original" and film.source is None:
+                    raise HTTPException(409, "The original has already been removed.")
+                self.active_outputs.add(output)
+            try:
+                manage_film(self.library, film, change.action)
+                with self.lock:
+                    self.recent_outputs.pop(film.source, None)
+                    if change.action == "delete_original":
+                        del self.media[film.source]
+                        if film.in_output:
+                            self.staged_only.add(film.output)
+                    else:
+                        self.staged_only.discard(film.output)
+                        if film.source is not None:
+                            self.media[film.source] = replace(
+                                self.media[film.source], output_exists=False, output_in_library=True,
+                            )
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise HTTPException(409, str(exc)) from exc
+            finally:
+                with self.lock:
+                    self.active_outputs.discard(output)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -133,7 +190,7 @@ async def lifespan(app: FastAPI):
         Path(os.getenv("OUTPUT_PATH", "/output")),
         scan_workers=int(os.getenv("SCAN_WORKERS", str(DEFAULT_SCAN_WORKERS))),
     )
-    state = AppState(library)
+    state = AppState(library, manage_originals=os.getenv("MEDIA_READ_ONLY", "true").lower() == "false")
     app.state.ac3fixer = state
     try:
         yield
@@ -161,6 +218,7 @@ def index(request: Request):
             "scan_errors": state.scan_errors,
             "file_errors": [file for file in state.media.values() if file.error],
             "stats": stats,
+            "manage_originals": state.manage_originals,
         }
     return templates.TemplateResponse(request=request, name="index.html", context=context)
 
@@ -171,8 +229,14 @@ def scan(request: Request):
     with state.scan_lock:
         started_at = monotonic()
         media, errors = state.library.scan()
+        staged_only = set()
+        if state.manage_originals:
+            staged_only = staged_without_originals(
+                state.library.output, {Path(file.output) for file in media.values()}, errors,
+            )
         with state.lock:
             state.media = media
+            state.staged_only = staged_only
             state.scan_errors = errors
             state.scanned = True
             # The scan replaces older output state. Keep jobs that finished while it ran.
@@ -187,6 +251,13 @@ def scan(request: Request):
 def enqueue(request: Request, selections: list[Selection]):
     state: AppState = request.app.state.ac3fixer
     return state.enqueue(selections)
+
+
+@app.post("/films/action")
+def film_action(request: Request, change: FilmRequest):
+    state: AppState = request.app.state.ac3fixer
+    state.manage(change)
+    return {"action": change.action, "output": change.output, "source": change.source}
 
 
 @app.get("/jobs")
@@ -205,4 +276,5 @@ def dashboard(request: Request):
             "stats": stats,
             "jobs": [asdict(job) for job in state.jobs],
             "pending_sources": pending_sources,
+            "converted_films": [asdict(film) for film in state.converted_films()],
         }
