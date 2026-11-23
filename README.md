@@ -90,6 +90,12 @@ to one film. The table uses `/data/Films/Movie.mkv` as an example.
 | **Move output to library** | Moves `/output/Films/Movie.ac3.mkv` to `/data/Films/Movie.ac3.mkv`. The original stays beside it. |
 | **Delete original** | Asks you to confirm `Films/Movie.mkv`. After verification, removes that original and keeps the converted film in its current folder. |
 
+The move progress bar appears beside the film. On separate mounts, the first
+half tracks bytes copied and the second half tracks bytes verified. The bar
+shows activity during the initial film check and reaches 100% after the staged
+file is removed. Refreshing the page shows the current move. A same-filesystem
+move can finish immediately using a hard link.
+
 You can use either action first. After a restart, a scan finds staged
 `.ac3.mkv` files even if their originals have been deleted. Moves across mounts
 use a temporary copy and compare its contents before publishing. The library

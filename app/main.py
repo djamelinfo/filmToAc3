@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from .converter import DEFAULT_SCAN_WORKERS, AudioTrack, MediaFile, MediaLibrary
-from .films import ConvertedFilm, FilmAction, manage_film, staged_without_originals
+from .films import ConvertedFilm, FilmAction, MoveProgress, manage_film, staged_without_originals
 
 
 class Selection(BaseModel):
@@ -48,6 +48,7 @@ class AppState:
         self.scan_errors: list[str] = []
         self.scanned = False
         self.jobs: list[Job] = []
+        self.move_progress: MoveProgress | None = None
         self.active_outputs: set[Path] = set()
         self.recent_outputs: dict[str, float] = {}
         self.lock = Lock()
@@ -150,6 +151,12 @@ class AppState:
         if not self.manage_originals:
             raise HTTPException(403, "The media library is read-only.")
         output = Path(change.output)
+        moving = change.action == "move"
+
+        def report(progress: MoveProgress) -> None:
+            with self.lock:
+                self.move_progress = progress
+
         with self.scan_lock:
             with self.lock:
                 film = next((item for item in self.converted_films()
@@ -163,8 +170,9 @@ class AppState:
                 if change.action == "delete_original" and film.source is None:
                     raise HTTPException(409, "The original has already been removed.")
                 self.active_outputs.add(output)
+                self.move_progress = MoveProgress(change.output, "checking") if moving else None
             try:
-                manage_film(self.library, film, change.action)
+                manage_film(self.library, film, change.action, report_progress=report if moving else None)
                 with self.lock:
                     self.recent_outputs.pop(film.source, None)
                     if change.action == "delete_original":
@@ -177,8 +185,13 @@ class AppState:
                             self.media[film.source] = replace(
                                 self.media[film.source], output_exists=False, output_in_library=True,
                             )
-            except (OSError, ValueError, RuntimeError) as exc:
-                raise HTTPException(409, str(exc)) from exc
+                        self.move_progress = MoveProgress(change.output, "completed", 100)
+            except Exception as exc:
+                if moving:
+                    report(MoveProgress(change.output, "failed", error=str(exc) or type(exc).__name__))
+                if isinstance(exc, (OSError, ValueError, RuntimeError)):
+                    raise HTTPException(409, str(exc)) from exc
+                raise
             finally:
                 with self.lock:
                     self.active_outputs.discard(output)
@@ -289,4 +302,5 @@ def dashboard(request: Request):
             "jobs": [asdict(job) for job in state.jobs],
             "pending_sources": pending_sources,
             "converted_films": [asdict(film) for film in state.converted_films()],
+            "move_progress": asdict(state.move_progress) if state.move_progress is not None else None,
         }

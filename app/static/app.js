@@ -14,8 +14,17 @@ const jobsTable = document.querySelector("#jobs-table");
 const jobsMessage = document.querySelector("#jobs-message");
 const filmsTable = document.querySelector("#films-table");
 const filmMessage = document.querySelector("#film-message");
+const filmStatus = document.querySelector("#film-status");
+const filmStatusHome = document.querySelector("#film-status-home");
+const moveProgress = document.querySelector("#move-progress");
+const moveBar = document.querySelector("#move-bar");
+const movePercent = document.querySelector("#move-percent");
+const moveBytes = document.querySelector("#move-bytes");
+const filmCells = new Map();
 let lastFilms;
-let changingFilm = false;
+let pendingAction = null;
+let activeMove = false;
+let lastServerMove;
 const statCounters = document.querySelectorAll("[data-stat]");
 const formatCount = new Intl.NumberFormat();
 let lastJobs;
@@ -44,16 +53,78 @@ function showPendingRows(pendingSources) {
     updateButton();
 }
 
+const sizeNumber = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+const sizeUnits = ["B", "KiB", "MiB", "GiB", "TiB"];
+function formatSize(bytes) {
+    let unit = 0;
+    while (bytes >= 1024 && unit < sizeUnits.length - 1) {
+        bytes /= 1024;
+        unit++;
+    }
+    return `${sizeNumber.format(bytes)} ${sizeUnits[unit]}`;
+}
+
+function positionFilmStatus(output) {
+    filmStatus.dataset.output = output ?? "";
+    const parent = filmCells.get(output) ?? filmStatusHome;
+    if (filmStatus.parentElement !== parent) parent.append(filmStatus);
+}
+
+function updateFilmButtons() {
+    for (const button of filmsTable.querySelectorAll("button")) {
+        button.disabled = Boolean(pendingAction || activeMove);
+    }
+}
+
+function isActiveMove(move) {
+    return Boolean(move && move.phase !== "completed" && move.phase !== "failed");
+}
+
+function showMove(move) {
+    const running = isActiveMove(move);
+    if (activeMove !== running) {
+        activeMove = running;
+        updateFilmButtons();
+    }
+    if (!move && !moveProgress.hidden) filmMessage.textContent = "";
+    moveProgress.hidden = !move || move.phase === "failed";
+    if (!move) return;
+    positionFilmStatus(move.output);
+    const messages = {
+        starting: `Starting move of ${move.output}…`,
+        checking: `Checking ${move.output} before moving…`,
+        copying: `Copying ${move.output} to the library…`,
+        verifying: `Verifying the library copy of ${move.output}…`,
+        finishing: `Finishing the move of ${move.output}…`,
+        completed: `Moved ${move.output} to the library folder.`,
+        failed: `Could not move ${move.output}. ${move.error}`,
+    };
+    const message = messages[move.phase];
+    if (filmMessage.textContent !== message) filmMessage.textContent = message;
+    if (typeof move.percent === "number") {
+        moveBar.value = move.percent;
+        movePercent.textContent = `${move.percent}%`;
+    } else {
+        moveBar.removeAttribute("value");
+        movePercent.textContent = "";
+    }
+    moveBytes.textContent = move.total_bytes > 0
+        ? `${formatSize(move.bytes_done)} of ${formatSize(move.total_bytes)} ${move.phase === "copying" ? "copied" : "verified"}`
+        : "";
+}
+
 async function changeFilm(film, action) {
-    if (changingFilm) return;
+    if (pendingAction || activeMove) return;
     const deleting = action === "delete_original";
     const location = film.in_library ? "library folder" : "output folder";
     if (deleting && !window.confirm(
         `Permanently delete the original "${film.source}"?\n\nThe converted file "${film.output}" will stay in the ${location}.`
     )) return;
-    changingFilm = true;
-    for (const button of filmsTable.querySelectorAll("button")) button.disabled = true;
-    filmMessage.textContent = deleting ? "Verifying the original streams before deletion…" : "Verifying and moving the converted file…";
+    pendingAction = { action, output: film.output };
+    positionFilmStatus(film.output);
+    showMove(deleting ? null : { output: film.output, phase: "starting" });
+    if (deleting) filmMessage.textContent = "Verifying the original streams before deletion…";
+    updateFilmButtons();
     try {
         const response = await fetch(filmsTable.dataset.url, {
             method: "POST",
@@ -62,14 +133,17 @@ async function changeFilm(film, action) {
         });
         const result = await response.json();
         if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "The file action failed.");
-        filmMessage.textContent = deleting
-            ? `Deleted original: ${film.source}. Converted file kept in the ${location}.`
-            : `Moved ${film.output} to the library folder.`;
+        if (deleting) {
+            filmMessage.textContent = `Deleted original: ${film.source}. Converted file kept in the ${location}.`;
+        } else {
+            showMove({ output: film.output, phase: "completed", percent: 100 });
+        }
     } catch (error) {
+        showMove(null);
         filmMessage.textContent = error.message;
     } finally {
-        changingFilm = false;
-        for (const button of filmsTable.querySelectorAll("button")) button.disabled = false;
+        pendingAction = null;
+        updateFilmButtons();
         refreshJobs();
     }
 }
@@ -79,6 +153,7 @@ function showConvertedFilms(films) {
     const snapshot = JSON.stringify(films);
     if (snapshot === lastFilms) return;
     const rows = document.createDocumentFragment();
+    filmCells.clear();
     for (const film of films) {
         const row = document.createElement("tr");
         row.insertCell().textContent = film.source ?? "Original absent";
@@ -94,16 +169,19 @@ function showConvertedFilms(films) {
             button.type = "button";
             button.textContent = label;
             button.className = action === "delete_original" ? "delete-original" : "";
-            button.disabled = changingFilm;
+            button.disabled = Boolean(pendingAction || activeMove);
             button.addEventListener("click", () => changeFilm(film, action));
             actions.append(button);
         }
         if (film.in_output) addButton("Move output to library", "move");
         if (film.source !== null) addButton("Delete original", "delete_original");
-        row.insertCell().append(actions);
+        const cell = row.insertCell();
+        cell.append(actions);
+        filmCells.set(film.output, cell);
         rows.append(row);
     }
     filmsTable.tBodies[0].replaceChildren(rows);
+    positionFilmStatus(filmStatus.dataset.output);
     filmsTable.hidden = films.length === 0;
     document.querySelector("#films-empty").hidden = films.length > 0;
     lastFilms = snapshot;
@@ -115,12 +193,19 @@ async function refreshJobs() {
     try {
         const response = await fetch(jobsTable.dataset.url, { cache: "no-store" });
         if (!response.ok) throw new Error();
-        const { jobs, stats, pending_sources: pendingSources, converted_films: films } = await response.json();
+        const { jobs, stats, pending_sources: pendingSources, converted_films: films, move_progress: move } = await response.json();
         for (const counter of statCounters) {
             counter.textContent = formatCount.format(stats[counter.dataset.stat]);
         }
         showPendingRows(pendingSources);
         showConvertedFilms(films);
+        const moveSnapshot = JSON.stringify(move);
+        if (filmsTable && moveSnapshot !== lastServerMove) {
+            lastServerMove = moveSnapshot;
+            if (!pendingAction || (pendingAction.action === "move" && pendingAction.output === move?.output && isActiveMove(move))) {
+                showMove(move);
+            }
+        }
         jobsMessage.textContent = jobs.length ? "" : "No conversions queued.";
         jobsTable.hidden = jobs.length === 0;
 
