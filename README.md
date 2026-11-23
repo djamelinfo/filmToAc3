@@ -133,6 +133,19 @@ Compose uses `latest` by default. To pin a published release, set
 For a private package, authenticate first with GitHub Container Registry.
 [Registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry)
 
+## Test local changes with Docker
+
+Build and start the current checkout, including uncommitted changes:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+Open [http://localhost:8088](http://localhost:8088), or the port set in
+`AC3FIXER_PORT`. The local override builds `ac3fixer:local` and uses the same
+media folders and settings as the published image. Run the command again after
+editing the app to rebuild and restart it.
+
 ## Run locally with uv
 
 Install uv and put `ffmpeg` and `ffprobe` on your PATH. From the repository

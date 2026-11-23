@@ -153,7 +153,7 @@ class WorkflowTest(ServerTestCase):
             page = response.read().decode("utf-8")
             self.assertEqual(response.headers.get("Cache-Control"), "no-cache")
 
-        for name, attribute in (("app.js", "src"), ("styles.css", "href")):
+        for name, attribute in (("app.js", "src"), ("styles.css", "href"), ("theme.js", "src")):
             with self.subTest(asset=name):
                 url = f"{self.base_url}/static/{name}"
                 with urlopen(url, timeout=10) as response:
