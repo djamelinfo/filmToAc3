@@ -1,0 +1,6 @@
+services:
+  ac3fixer:
+    image: ac3fixer:local
+    build:
+      context: .
+    pull_policy: never

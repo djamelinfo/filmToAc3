@@ -17,6 +17,9 @@ docker compose up -d
 Open [http://localhost:8088](http://localhost:8088). The port is bound to localhost
 by default. The published image includes FFmpeg and ffprobe.
 
+Use **Light** or **Dark** in the header to change the color theme. The app follows
+your device theme until you choose one, then remembers your choice in this browser.
+
 | Host directory | Container directory | Access |
 | --- | --- | --- |
 | `./data` | `/data` | Source media, read-only by default |
@@ -132,6 +135,19 @@ Compose uses `latest` by default. To pin a published release, set
 `docker compose pull ac3fixer` followed by `docker compose up -d ac3fixer`.
 For a private package, authenticate first with GitHub Container Registry.
 [Registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry)
+
+## Test local changes with Docker
+
+Build and start the current checkout, including uncommitted changes:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+Open [http://localhost:8088](http://localhost:8088), or the port set in
+`AC3FIXER_PORT`. The local override builds `ac3fixer:local` and uses the same
+media folders and settings as the published image. Run the command again after
+editing the app to rebuild and restart it.
 
 ## Run locally with uv
 

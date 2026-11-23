@@ -217,7 +217,7 @@ app_dir = Path(__file__).parent
 static_dir = app_dir / "static"
 asset_versions = {
     name: sha256((static_dir / name).read_bytes()).hexdigest()[:16]
-    for name in ("app.js", "styles.css")
+    for name in ("app.js", "styles.css", "theme.js")
 }
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 templates = Jinja2Templates(directory=app_dir / "templates")
