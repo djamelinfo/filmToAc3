@@ -6,6 +6,7 @@ import socket
 import subprocess
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
@@ -429,7 +430,10 @@ class FilmManagementTest(ServerTestCase):
         saved = original.read_bytes()
         converted = staged.read_bytes()
         self.assertEqual(probe(staged)["format"]["tags"]["AC3FIXER_PROCESSED"], "1")
-        self.action("move", self.relative, self.output_name)
+        with patch.object(films, "_copy_file", side_effect=AssertionError("Expected a same-filesystem hard link")):
+            self.action("move", self.relative, self.output_name)
+        progress = json.loads(self.request("/dashboard"))["move_progress"]
+        self.assertEqual((progress["phase"], progress["percent"]), ("completed", 100))
         self.assertFalse(staged.exists())
         self.assertEqual(original.read_bytes(), saved)
         self.assertEqual(sibling.read_bytes(), converted)
@@ -473,16 +477,95 @@ class FilmManagementTest(ServerTestCase):
             link(before, after)
 
         with patch.object(films.os, "link", cross_mount):
-            with patch.object(films.shutil, "copyfile", side_effect=lambda src, dst: dst.write_bytes(b"partial")):
+            with patch.object(films, "_copy_file", side_effect=lambda src, dst, report: dst.write_bytes(b"partial")):
                 with self.assertRaises(HTTPError) as error:
                     self.action("move", None, self.output_name)
                 self.assertIn("failed verification", error.exception.read().decode())
+            failed = json.loads(self.request("/dashboard"))["move_progress"]
+            self.assertEqual(failed["phase"], "failed")
+            self.assertIsNone(failed["percent"])
+            self.assertIn("failed verification", failed["error"])
             self.assertFalse(sibling.exists())
             self.assertEqual(staged.read_bytes(), converted)
             self.assertFalse(list(sibling.parent.glob(".ac3fixer-*")))
             self.action("move", None, self.output_name)
         self.assertFalse(staged.exists())
         self.assertEqual(sibling.read_bytes(), converted)
+
+    def test_move_reports_bytes_during_copy_and_verification(self):
+        original, staged, sibling = self.convert_fixture()
+        size = staged.stat().st_size
+        link = os.link
+
+        def cross_mount(before, after):
+            if before == staged:
+                raise OSError(errno.EXDEV, "separate mounts")
+            return link(before, after)
+
+        copying, verifying = Event(), Event()
+        continue_copy, continue_verify = Event(), Event()
+
+        def pause_after_chunk(operation, reached, resume):
+            def transfer(first, second, report):
+                def observe(done):
+                    report(done)
+                    if not reached.is_set():
+                        reached.set()
+                        if not resume.wait(timeout=10):
+                            raise RuntimeError("Move test timed out")
+
+                return operation(first, second, observe)
+            return transfer
+
+        with (
+            patch.object(films.os, "link", cross_mount),
+            patch.object(films, "MOVE_CHUNK_SIZE", size // 4),
+            patch.object(films, "_copy_file", pause_after_chunk(films._copy_file, copying, continue_copy)),
+            patch.object(films, "_same_bytes", pause_after_chunk(films._same_bytes, verifying, continue_verify)),
+            ThreadPoolExecutor(max_workers=1) as worker,
+        ):
+            action = worker.submit(self.action, "move", self.relative, self.output_name)
+            try:
+                for phase, reached, resume, start in (
+                    ("copying", copying, continue_copy, 0),
+                    ("verifying", verifying, continue_verify, 50),
+                ):
+                    self.assertTrue(reached.wait(timeout=5), phase)
+                    progress = json.loads(self.request("/dashboard"))["move_progress"]
+                    self.assertEqual(progress["output"], self.output_name)
+                    self.assertEqual(progress["phase"], phase)
+                    self.assertEqual(progress["total_bytes"], size)
+                    self.assertGreater(progress["bytes_done"], 0)
+                    self.assertLessEqual(progress["bytes_done"], size // 4)
+                    self.assertEqual(progress["percent"], start + 50 * progress["bytes_done"] // size)
+                    self.assertTrue(staged.exists())
+                    self.assertFalse(sibling.exists())
+                    resume.set()
+            finally:
+                continue_copy.set()
+                continue_verify.set()
+            action.result(timeout=10)
+
+        progress = json.loads(self.request("/dashboard"))["move_progress"]
+        self.assertEqual((progress["phase"], progress["percent"]), ("completed", 100))
+        self.assertTrue(sibling.is_file() and original.is_file())
+        self.assertFalse(staged.exists())
+
+    def test_copy_resumes_from_the_last_reported_kernel_range(self):
+        source = self.work_dir / "staged"
+        target = self.work_dir / "move.part"
+        source.write_bytes(b"the complete converted file")
+        counts = []
+
+        def copy_first_range(reader, writer, length):
+            if counts:
+                raise OSError(errno.EXDEV, "remaining ranges require a buffered copy")
+            return os.write(writer, os.read(reader, min(3, length)))
+
+        with patch.object(films.os, "copy_file_range", copy_first_range, create=True):
+            films._copy_file(source, target, counts.append)
+        self.assertEqual(target.read_bytes(), source.read_bytes())
+        self.assertEqual(counts, [3, source.stat().st_size])
 
     def test_refuses_conflicts_changed_original_and_damaged_output(self):
         original, staged, sibling = self.convert_fixture()
@@ -525,7 +608,7 @@ class FilmManagementTest(ServerTestCase):
     def test_interrupted_move_resumes_without_overwriting(self):
         original, staged, sibling = self.convert_fixture()
         with self.assertRaisesRegex(ValueError, "same directory entry"):
-            films._publish_in_library(staged, staged, films._version(staged))
+            films._publish_in_library(staged, staged, films._version(staged), begin_phase=self.fail)
         unlink = Path.unlink
 
         def fail_staged_unlink(path, *args, **kwargs):

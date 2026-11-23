@@ -124,6 +124,8 @@ small, .error { white-space: pre-line; }
 
 .job-progress progress { width: 100%; accent-color: #154996; }
 .film-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+#film-message { margin: .5rem 0 0; }
+#move-progress { max-width: 22rem; }
 .delete-original { background: white; color: #a51d23; border-color: #ba7377; }
 .delete-original:hover:enabled { background: #fbecee; }
 #jobs-message:empty, #queue-message:empty, #film-message:empty { display: none; }

@@ -169,7 +169,18 @@
                         <tbody></tbody>
                     </table>
                 </div>
-                <p id="film-message" role="status"></p>
+                <div id="film-status-home">
+                    <div id="film-status">
+                        <p id="film-message" role="status"></p>
+                        <div id="move-progress" hidden>
+                            <div class="job-progress">
+                                <progress id="move-bar" max="100" aria-labelledby="film-message"></progress>
+                                <span id="move-percent" aria-hidden="true"></span>
+                            </div>
+                            <small id="move-bytes"></small>
+                        </div>
+                    </div>
+                </div>
             {% else %}
                 <p class="muted">The library is read-only. To enable moving outputs and deleting originals,
                     set <code>MEDIA_READ_ONLY=false</code> in Compose and recreate the service.</p>
