@@ -17,9 +17,6 @@ docker compose up -d
 Open [http://localhost:8088](http://localhost:8088). The port is bound to localhost
 by default. The published image includes FFmpeg and ffprobe.
 
-Use **Light** or **Dark** in the header to change the color theme. The app follows
-your device theme until you choose one, then remembers your choice in this browser.
-
 | Host directory | Container directory | Access |
 | --- | --- | --- |
 | `./data` | `/data` | Source media, read-only by default |
